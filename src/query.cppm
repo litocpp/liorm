@@ -4,7 +4,7 @@ module;
 #include <string_view>
 #include <type_traits>
 export module liorm:query;
-export import rstd.core;
+export import :schema;
 
 namespace liorm::query {
 class Compiler;
@@ -25,7 +25,14 @@ enum class ErrorKind {
   UnknownCte,
   ParameterConflict,
   UnsafeWrite,
-  UnsupportedType
+  UnsupportedType,
+  UnknownTable,
+  UnknownColumn,
+  AmbiguousColumn,
+  InvalidSource,
+  InvalidRelation,
+  TypeMismatch,
+  NullableAssignment
 };
 struct Error {
   ErrorKind kind{};
@@ -37,35 +44,6 @@ struct Error {
     return {context.data(), length};
   }
 };
-enum class ParameterKind { Integer, Real, Boolean, Text, Blob };
-struct ParameterType {
-  ParameterKind kind{};
-  bool nullable{};
-  constexpr bool operator==(const ParameterType &) const = default;
-};
-struct TextParameter {};
-struct BlobParameter {};
-template <class T> struct Nullable {};
-template <class T> struct ParameterTraits;
-template <> struct ParameterTraits<rstd::i32> {
-  static constexpr ParameterType type{ParameterKind::Integer, false};
-};
-template <> struct ParameterTraits<rstd::i64> : ParameterTraits<rstd::i32> {};
-template <> struct ParameterTraits<rstd::f64> {
-  static constexpr ParameterType type{ParameterKind::Real, false};
-};
-template <> struct ParameterTraits<bool> {
-  static constexpr ParameterType type{ParameterKind::Boolean, false};
-};
-template <> struct ParameterTraits<TextParameter> {
-  static constexpr ParameterType type{ParameterKind::Text, false};
-};
-template <> struct ParameterTraits<BlobParameter> {
-  static constexpr ParameterType type{ParameterKind::Blob, false};
-};
-template <class T> struct ParameterTraits<Nullable<T>> {
-  static constexpr ParameterType type{ParameterTraits<T>::type.kind, true};
-};
 struct Limits {
   unsigned nodes = 512;
   unsigned queries = 128;
@@ -73,6 +51,8 @@ struct Limits {
   unsigned sql = 16384;
   unsigned parameters = 64;
   unsigned depth = 64;
+  unsigned registrations = 16;
+  schema::SchemaLimits schema{};
 };
 enum class Function {
   Count,
@@ -105,6 +85,7 @@ class QueryBuilder;
 class Query;
 class Expr {
   friend class QueryBuilder;
+  friend class BoundTable;
   friend class Query;
   QueryBuilder *owner_{};
   unsigned id_{};
@@ -215,6 +196,8 @@ struct Node {
   ParameterType type{};
   unsigned operation{};
   bool flag{};
+  Id source{};
+  unsigned registration{}, table{}, column{};
 };
 enum class StatementKind { Select, Insert, Update, Delete };
 enum class Slot {
@@ -247,10 +230,51 @@ class Compiler;
 } // namespace liorm::query
 
 export namespace liorm::query {
+class BoundTable {
+  friend class QueryBuilder;
+  friend class BoundSchema;
+  QueryBuilder *owner_{};
+  unsigned source_{};
+  constexpr BoundTable(QueryBuilder *owner, unsigned source)
+      : owner_(owner), source_(source) {}
+
+public:
+  constexpr BoundTable() = default;
+  constexpr auto source() const -> Expr;
+  constexpr auto col(std::string_view name) const -> Expr;
+};
+class BoundForeignKey {
+  friend class QueryBuilder;
+  friend class BoundSchema;
+  QueryBuilder *owner_{};
+  unsigned registration_{}, id_{};
+  constexpr BoundForeignKey(QueryBuilder *owner, unsigned registration,
+                            unsigned id)
+      : owner_(owner), registration_(registration), id_(id) {}
+
+public:
+  constexpr BoundForeignKey() = default;
+};
+class BoundSchema {
+  friend class QueryBuilder;
+  QueryBuilder *owner_{};
+  unsigned registration_{};
+  constexpr BoundSchema(QueryBuilder *owner, unsigned registration)
+      : owner_(owner), registration_(registration) {}
+
+public:
+  constexpr BoundSchema() = default;
+  constexpr auto table(std::string_view name, std::string_view alias = {}) const
+      -> BoundTable;
+  constexpr auto foreign_key(std::string_view name) const -> BoundForeignKey;
+};
 class QueryBuilder {
   friend class Expr;
   friend class Query;
   friend class Compiler;
+  friend class BoundSchema;
+  friend class BoundTable;
+  schema::Registry schemas_;
   std::array<Node, 512> nodes_{};
   std::array<QueryData, 128> queries_{};
   std::array<char, 8192> text_{};
@@ -375,9 +399,23 @@ class QueryBuilder {
       node.qualifier = store(qualifier);
     return Expr(this, add(node));
   }
+  constexpr auto bound_column(Id source_id, unsigned column_id) -> Expr {
+    const auto &source = nodes_[source_id];
+    auto column = schemas_.column(column_id);
+    return Expr(this,
+                add(Node{.kind = Kind::Column,
+                         .name = store(column.name),
+                         .qualifier = source.qualifier.length ? source.qualifier
+                                                              : source.name,
+                         .type = column.type,
+                         .source = source_id,
+                         .registration = source.registration,
+                         .table = source.table,
+                         .column = column_id}));
+  }
   constexpr auto copy_node(const QueryBuilder &source, Id id,
                            std::array<Id, 512> &nm, std::array<Id, 128> &qm,
-                           unsigned depth) -> Id {
+                           unsigned depth, std::array<Id, 16> &sm) -> Id {
     if (!id)
       return 0;
     if (depth >= limits_.depth) {
@@ -389,27 +427,45 @@ class QueryBuilder {
     Node node = source.nodes_[id];
     node.name = store(source.text(node.name), true);
     node.qualifier = store(source.text(node.qualifier), true);
+    if (node.registration) {
+      unsigned old = node.registration - 1;
+      if (!sm[old]) {
+        auto imported = schemas_.import(source.schemas_, old);
+        if (imported.is_err()) {
+          fail(ErrorKind::Capacity, 0, "schemas");
+          return 0;
+        }
+        sm[old] = imported.unwrap() + 1;
+      }
+      node.registration = sm[old];
+      node.table = schemas_.remap_table(source.schemas_, node.table, old,
+                                        node.registration - 1);
+      if (node.kind == Kind::Column)
+        node.column = schemas_.remap_column(source.schemas_, node.column, old,
+                                            node.registration - 1);
+    }
+    node.source = copy_node(source, node.source, nm, qm, depth + 1, sm);
     switch (node.kind) {
     case Kind::Derived:
     case Kind::Scalar:
     case Kind::Exists:
     case Kind::CteDefinition:
-      node.a = copy_query(source, node.a, nm, qm, depth + 1);
+      node.a = copy_query(source, node.a, nm, qm, depth + 1, sm);
       break;
     case Kind::InQuery:
-      node.a = copy_node(source, node.a, nm, qm, depth + 1);
-      node.b = copy_query(source, node.b, nm, qm, depth + 1);
+      node.a = copy_node(source, node.a, nm, qm, depth + 1, sm);
+      node.b = copy_query(source, node.b, nm, qm, depth + 1, sm);
       break;
     default:
-      node.a = copy_node(source, node.a, nm, qm, depth + 1);
-      node.b = copy_node(source, node.b, nm, qm, depth + 1);
+      node.a = copy_node(source, node.a, nm, qm, depth + 1, sm);
+      node.b = copy_node(source, node.b, nm, qm, depth + 1, sm);
       break;
     }
     return nm[id] = add(node);
   }
   constexpr auto copy_query(const QueryBuilder &source, Id id,
                             std::array<Id, 512> &nm, std::array<Id, 128> &qm,
-                            unsigned depth) -> Id {
+                            unsigned depth, std::array<Id, 16> &sm) -> Id {
     if (!id || depth >= limits_.depth) {
       fail(ErrorKind::Depth);
       return 0;
@@ -418,16 +474,18 @@ class QueryBuilder {
       return qm[id];
     auto data = source.queries_[id];
     for (auto &slot : data.slots)
-      slot = copy_node(source, slot, nm, qm, depth + 1);
+      slot = copy_node(source, slot, nm, qm, depth + 1, sm);
     return qm[id] = add_query(data).id_;
   }
 
 public:
-  constexpr explicit QueryBuilder(Limits limits = {}) : limits_(limits) {
+  constexpr explicit QueryBuilder(Limits limits = {})
+      : schemas_(limits.schema, limits.registrations), limits_(limits) {
     if (limits.nodes > nodes_.size() || limits.nodes < 2 ||
         limits.queries > queries_.size() || limits.queries < 2 ||
         limits.text > text_.size() || limits.sql > 16384 ||
-        limits.parameters > 64 || limits.depth > 128 || !limits.depth)
+        limits.parameters > 64 || limits.depth > 128 || !limits.depth ||
+        limits.registrations > 16 || !schema::valid_limits(limits.schema))
       fail(ErrorKind::Capacity, 0, "limits");
     if (error_.kind != ErrorKind::None)
       limits_ = Limits{};
@@ -437,6 +495,44 @@ public:
   auto operator=(const QueryBuilder &) -> QueryBuilder & = delete;
   auto operator=(QueryBuilder &&) -> QueryBuilder & = delete;
   constexpr auto error() const -> Error { return error_; }
+  constexpr auto use(const schema::Schema &schema) -> BoundSchema {
+    if (error_.kind != ErrorKind::None)
+      return {};
+    auto registered = schemas_.use(schema);
+    if (registered.is_err()) {
+      fail(ErrorKind::Capacity, 0, "schemas");
+      return {};
+    }
+    return BoundSchema(this, registered.unwrap() + 1);
+  }
+  constexpr auto on(BoundForeignKey fk, BoundTable source, BoundTable target)
+      -> Expr {
+    if (!fk.owner_ || !source.owner_ || !target.owner_) {
+      fail(ErrorKind::InvalidHandle);
+      return {};
+    }
+    if (fk.owner_ != this || source.owner_ != this || target.owner_ != this) {
+      fail(ErrorKind::ForeignOwner);
+      return {};
+    }
+    auto f = schemas_.foreign_key(fk.id_);
+    auto key = schemas_.key(f.target);
+    auto a = nodes_[source.source_], b = nodes_[target.source_];
+    if (a.registration != fk.registration_ ||
+        b.registration != fk.registration_ || a.table != f.table ||
+        b.table != key.table || source.source_ == target.source_) {
+      fail(ErrorKind::InvalidRelation, 0, f.name);
+      return {};
+    }
+    Expr result;
+    for (unsigned i = 0; i < f.columns.size(); ++i) {
+      auto condition = bound_column(source.source_, f.columns[i])
+                           .binary(Binary::Equal, bound_column(target.source_,
+                                                               key.columns[i]));
+      result = i ? result.binary(Binary::And, condition) : condition;
+    }
+    return result;
+  }
   constexpr auto col(std::string_view name) -> Expr {
     return named(Kind::Column, name);
   }
@@ -454,12 +550,15 @@ public:
     return Expr(this, add(Node{.kind = Kind::Star,
                                .qualifier = store(qualifier, true)}));
   }
-  template <class T>
-    requires requires { ParameterTraits<T>::type; }
-  constexpr auto param(std::string_view name) -> Expr {
-    return Expr(this, add(Node{.kind = Kind::Parameter,
-                               .name = store(name),
-                               .type = ParameterTraits<T>::type}));
+  template <class T> constexpr auto param(std::string_view name) -> Expr {
+    if constexpr (requires { ParameterTraits<T>::type; })
+      return Expr(this, add(Node{.kind = Kind::Parameter,
+                                 .name = store(name),
+                                 .type = ParameterTraits<T>::type}));
+    else {
+      fail(ErrorKind::UnsupportedType, 0, name);
+      return {};
+    }
   }
   constexpr auto integer(long long value) -> Expr {
     return Expr(this, add(Node{.kind = Kind::Integer, .integer = value}));
@@ -524,6 +623,8 @@ public:
     return Expr(this, add(Node{.kind = Kind::Exists, .a = check(query)}));
   }
   constexpr auto import_query(Query query) -> Query {
+    if (error_.kind != ErrorKind::None)
+      return {};
     if (!query.owner_ || !query.id_) {
       fail(ErrorKind::InvalidHandle);
       return {};
@@ -534,10 +635,54 @@ public:
     }
     std::array<Id, 512> nodes{};
     std::array<Id, 128> queries{};
-    return Query(this, copy_query(*query.owner_, query.id_, nodes, queries, 0));
+    std::array<Id, 16> schemas{};
+    return Query(
+        this, copy_query(*query.owner_, query.id_, nodes, queries, 0, schemas));
   }
 };
 
+constexpr auto BoundSchema::table(std::string_view name,
+                                  std::string_view alias) const -> BoundTable {
+  if (!owner_)
+    return {};
+  auto id = owner_->schemas_.find_table(registration_ - 1, name);
+  if (!id) {
+    owner_->fail(ErrorKind::UnknownTable, 0, name);
+    return {};
+  }
+  Node n{.kind = Kind::Table,
+         .name = owner_->store(owner_->schemas_.table(*id).name),
+         .registration = registration_,
+         .table = *id};
+  if (!alias.empty())
+    n.qualifier = owner_->store(alias);
+  return BoundTable(owner_, owner_->add(n));
+}
+constexpr auto BoundSchema::foreign_key(std::string_view name) const
+    -> BoundForeignKey {
+  if (!owner_)
+    return {};
+  auto id = owner_->schemas_.find_foreign_key(registration_ - 1, name);
+  if (!id) {
+    owner_->fail(ErrorKind::InvalidRelation, 0, name);
+    return {};
+  }
+  return BoundForeignKey(owner_, registration_, *id);
+}
+constexpr auto BoundTable::source() const -> Expr {
+  return owner_ ? Expr(owner_, source_) : Expr{};
+}
+constexpr auto BoundTable::col(std::string_view name) const -> Expr {
+  if (!owner_ || !source_)
+    return {};
+  auto source = owner_->nodes_[source_];
+  auto id = owner_->schemas_.find_column(source.table, name);
+  if (!id) {
+    owner_->fail(ErrorKind::UnknownColumn, source_, name);
+    return {};
+  }
+  return owner_->bound_column(source_, *id);
+}
 constexpr auto Expr::binary(Binary op, Expr other) const -> Expr {
   if (!owner_)
     return {};

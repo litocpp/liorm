@@ -1,5 +1,6 @@
 module;
 #include <array>
+#include <optional>
 #include <string_view>
 export module liorm:sqlite;
 export import :query;
@@ -48,9 +49,27 @@ public:
 } // namespace liorm::query
 
 namespace liorm::query {
+struct Source {
+  Text name{};
+  Id instance{};
+  unsigned table{};
+  bool known{}, nullable{};
+};
+enum class FactKind { Unknown, Known, NullLiteral };
+struct Fact {
+  FactKind kind{};
+  ValueType type{};
+};
+struct ProjectionFacts {
+  Id list{};
+  std::array<Fact, 512> values{};
+};
 struct Scope {
   const Scope *parent{};
-  std::array<Text, 128> sources{};
+  std::array<Source, 128> sources{};
+  Id write_target{};
+  const ProjectionFacts *projection{};
+  bool ordering{};
   unsigned count{};
 };
 struct CteScope {
@@ -62,6 +81,8 @@ struct CteScope {
 };
 struct PreparedQuery {
   std::array<unsigned, 512> parameter_slots{};
+  std::array<Fact, 4096> facts{};
+  unsigned count{};
 };
 class Compiler {
   const QueryBuilder &builder_;
@@ -69,6 +90,7 @@ class Compiler {
   CompiledQuery result_{};
   Error error_{};
   bool preparing_{true};
+  unsigned fact_cursor_{};
 
   constexpr auto text(Text t) const -> std::string_view {
     return builder_.text(t);
@@ -136,24 +158,14 @@ class Compiler {
     out(delimiter);
   }
   constexpr auto same(Text a, Text b) const -> bool {
-    auto x = text(a), y = text(b);
-    if (x.size() != y.size())
-      return false;
-    for (unsigned i = 0; i < x.size(); ++i) {
-      auto fold = [](char c) {
-        return c >= 'A' && c <= 'Z' ? char(c + ('a' - 'A')) : c;
-      };
-      if (fold(x[i]) != fold(y[i]))
-        return false;
-    }
-    return true;
+    return same_name(text(a), text(b));
   }
   constexpr void qualifier(Text value, const Scope *scope, Id id) {
     if (!preparing_ || !value.length)
       return;
     for (auto s = scope; s; s = s->parent)
       for (unsigned i = 0; i < s->count; ++i)
-        if (same(value, s->sources[i]))
+        if (same(value, s->sources[i].name))
           return;
     fail(ErrorKind::UnknownQualifier, id, text(value));
   }
@@ -164,7 +176,7 @@ class Compiler {
           return true;
     return false;
   }
-  constexpr void register_source(Id id, Scope &scope) {
+  constexpr void register_source(Id id, Scope &scope, bool nullable = false) {
     if (!preparing_)
       return;
     if (!id) {
@@ -172,10 +184,11 @@ class Compiler {
       return;
     }
     auto n = node(id);
-    Text name = n.name;
+    Text name =
+        n.kind == Kind::Table && n.qualifier.length ? n.qualifier : n.name;
     if (n.kind == Kind::Alias) {
       auto k = node(n.a).kind;
-      if (k != Kind::Table && k != Kind::Cte) {
+      if ((k != Kind::Table && k != Kind::Cte) || node(n.a).qualifier.length) {
         fail(ErrorKind::InvalidShape, id, "source alias");
         return;
       }
@@ -185,7 +198,7 @@ class Compiler {
       return;
     }
     for (unsigned i = 0; i < scope.count; ++i)
-      if (same(name, scope.sources[i])) {
+      if (same(name, scope.sources[i].name)) {
         fail(ErrorKind::DuplicateName, id, text(name));
         return;
       }
@@ -193,7 +206,129 @@ class Compiler {
       fail(ErrorKind::Capacity, id, "sources");
       return;
     }
-    scope.sources[scope.count++] = name;
+    const auto &base = n.kind == Kind::Alias ? node(n.a) : n;
+    scope.sources[scope.count++] = {name, id, base.table,
+                                    bool(base.registration), nullable};
+  }
+  constexpr auto column(Id id, const Scope *scope, bool target,
+                        bool alias_first = false) -> Fact {
+    const auto &n = node(id);
+    auto from = [&](const Source &source) -> Fact {
+      if (n.source && n.source != source.instance) {
+        fail(ErrorKind::InvalidSource, id, text(n.name));
+        return {};
+      }
+      if (!source.known)
+        return {};
+      unsigned column_id = n.column;
+      if (n.registration) {
+        if (source.table != n.table) {
+          fail(ErrorKind::InvalidSource, id, text(n.name));
+          return {};
+        }
+      } else {
+        auto resolved =
+            builder_.schemas_.find_column(source.table, text(n.name));
+        if (!resolved) {
+          fail(ErrorKind::UnknownColumn, id, text(n.name));
+          return {};
+        }
+        column_id = *resolved;
+      }
+      auto type = builder_.schemas_.column(column_id).type;
+      type.nullable = type.nullable || source.nullable;
+      return {FactKind::Known, type};
+    };
+    if (target) {
+      if (!scope || !scope->write_target) {
+        fail(ErrorKind::InvalidShape, id, "write target");
+        return {};
+      }
+      if (n.qualifier.length && !n.source) {
+        fail(ErrorKind::InvalidShape, id, "unqualified column");
+        return {};
+      }
+      return from(scope->sources[0]);
+    }
+    if (n.qualifier.length) {
+      for (auto s = scope; s; s = s->parent)
+        for (unsigned i = 0; i < s->count; ++i)
+          if (same(n.qualifier, s->sources[i].name))
+            return from(s->sources[i]);
+      fail(n.source ? ErrorKind::InvalidSource : ErrorKind::UnknownQualifier,
+           id, text(n.qualifier));
+      return {};
+    }
+    auto alias = [&](const Scope *s) -> std::optional<Fact> {
+      if (!s || !s->ordering || !s->projection)
+        return {};
+      unsigned index = 0;
+      for (Id l = s->projection->list; l; l = node(l).b, ++index) {
+        const auto &projected = node(node(l).a);
+        if (projected.kind == Kind::Alias && same(n.name, projected.name))
+          return s->projection->values[index];
+      }
+      return {};
+    };
+    if (alias_first)
+      if (auto found = alias(scope))
+        return *found;
+    bool has_sources = false;
+    for (auto s = scope; s; s = s->parent) {
+      has_sources = has_sources || s->count;
+      unsigned matches = 0;
+      bool unknown = false;
+      Source found;
+      for (unsigned i = 0; i < s->count; ++i) {
+        auto source = s->sources[i];
+        if (!source.known) {
+          unknown = true;
+          continue;
+        }
+        if (builder_.schemas_.find_column(source.table, text(n.name))) {
+          ++matches;
+          found = source;
+        }
+      }
+      if (matches > 1) {
+        fail(ErrorKind::AmbiguousColumn, id, text(n.name));
+        return {};
+      }
+      if (unknown)
+        return {};
+      if (matches)
+        return from(found);
+      if (auto projected = alias(s))
+        return *projected;
+    }
+    if (has_sources)
+      fail(ErrorKind::UnknownColumn, id, text(n.name));
+    return {};
+  }
+  constexpr void compatible(Fact a, Fact b, Id id) {
+    if (a.kind == FactKind::Known && b.kind == FactKind::Known &&
+        !comparable(a.type.kind, b.type.kind))
+      fail(ErrorKind::TypeMismatch, id, "comparison");
+  }
+  constexpr auto nullable(Fact f) const -> bool {
+    return f.kind == FactKind::NullLiteral ||
+           (f.kind == FactKind::Known && f.type.nullable);
+  }
+  constexpr auto boolean(Fact a, Fact b = {FactKind::Known,
+                                           {ValueKind::Boolean, false}}) const
+      -> Fact {
+    if (a.kind == FactKind::Unknown || b.kind == FactKind::Unknown)
+      return {};
+    return {FactKind::Known, {ValueKind::Boolean, nullable(a) || nullable(b)}};
+  }
+  constexpr void assignment(Fact target, Fact value, Id id) {
+    if (target.kind != FactKind::Known || value.kind == FactKind::Unknown)
+      return;
+    if (value.kind == FactKind::Known &&
+        !assignable(target.type.kind, value.type.kind))
+      fail(ErrorKind::TypeMismatch, id, "assignment");
+    if (!target.type.nullable && nullable(value))
+      fail(ErrorKind::NullableAssignment, id, "assignment");
   }
   constexpr auto count(Id list) const -> unsigned {
     unsigned n = 0;
@@ -236,13 +371,17 @@ class Compiler {
   }
   enum class Use { Value, Projection, Ordering, Assignment, Column };
   constexpr void expressions(Id list, const Scope *scope, const CteScope *ctes,
-                             unsigned depth, Use use = Use::Value) {
+                             unsigned depth, Use use = Use::Value,
+                             ProjectionFacts *projection = nullptr) {
     bool first = true;
+    unsigned index = 0;
     for (; list && error_.kind == ErrorKind::None; list = node(list).b) {
       if (!first)
         out(", ");
       first = false;
-      expression(node(list).a, scope, ctes, depth + 1, use);
+      auto fact = expression(node(list).a, scope, ctes, depth + 1, use);
+      if (projection)
+        projection->values[index++] = fact;
     }
   }
   constexpr void scalar_query(Id id, const Scope *scope, const CteScope *ctes,
@@ -259,28 +398,39 @@ class Compiler {
     query(id, scope, ctes, depth + 1);
     out(')');
   }
-  constexpr void expression(Id id, const Scope *scope, const CteScope *ctes,
-                            unsigned depth, Use use = Use::Value) {
+  constexpr auto expression(Id id, const Scope *scope, const CteScope *ctes,
+                            unsigned depth, Use use = Use::Value) -> Fact {
     if (!enter(depth, id))
-      return;
+      return {};
     if (!id) {
       fail(ErrorKind::InvalidHandle);
-      return;
+      return {};
     }
     const auto &n = node(id);
+    unsigned occurrence = 0;
+    if (preparing_) {
+      if (prepared_.count == prepared_.facts.size()) {
+        fail(ErrorKind::Capacity, id, "expression uses");
+        return {};
+      }
+      occurrence = prepared_.count++;
+    } else
+      occurrence = fact_cursor_++;
+    Fact fact;
     if (preparing_ && use == Use::Column &&
-        (n.kind != Kind::Column || n.qualifier.length)) {
+        (n.kind != Kind::Column || (n.qualifier.length && !n.source))) {
       fail(ErrorKind::InvalidShape, id, "unqualified column");
-      return;
+      return {};
     }
     if (preparing_ && use == Use::Assignment && n.kind != Kind::Assignment) {
       fail(ErrorKind::InvalidShape, id, "assignment");
-      return;
+      return {};
     }
     switch (n.kind) {
     case Kind::Column:
-      qualifier(n.qualifier, scope, id);
-      if (n.qualifier.length) {
+      if (preparing_)
+        fact = column(id, scope, use == Use::Column, use == Use::Ordering);
+      if (n.qualifier.length && use != Use::Column) {
         quote(n.qualifier);
         out('.');
       }
@@ -289,7 +439,7 @@ class Compiler {
     case Kind::Star:
       if (preparing_ && use != Use::Projection) {
         fail(ErrorKind::InvalidShape, id, "star");
-        return;
+        return {};
       }
       qualifier(n.qualifier, scope, id);
       if (n.qualifier.length) {
@@ -299,15 +449,19 @@ class Compiler {
       out('*');
       break;
     case Kind::Integer:
+      fact = {FactKind::Known, {ValueKind::Integer, false}};
       number(n.integer);
       break;
     case Kind::Text:
+      fact = {FactKind::Known, {ValueKind::Text, false}};
       quote(n.name, '\'');
       break;
     case Kind::Null:
+      fact = {FactKind::NullLiteral, {}};
       out("NULL");
       break;
     case Kind::Parameter:
+      fact = {FactKind::Known, n.type};
       parameter(id);
       break;
     case Kind::Binary: {
@@ -316,70 +470,113 @@ class Compiler {
           " - ", " * ",  " / ", " AND ", " OR ", " LIKE "};
       if (n.operation >= std::size(ops)) {
         fail(ErrorKind::InvalidShape, id, "operator");
-        return;
-      }
-      if (preparing_ && n.operation <= unsigned(Binary::GreaterEqual) &&
-          (node(n.a).kind == Kind::Null || node(n.b).kind == Kind::Null)) {
-        fail(ErrorKind::InvalidShape, id, "use IS NULL");
-        return;
+        return {};
       }
       out('(');
-      expression(n.a, scope, ctes, depth + 1);
+      auto a = expression(n.a, scope, ctes, depth + 1);
       out(ops[n.operation]);
-      expression(n.b, scope, ctes, depth + 1);
+      auto b = expression(n.b, scope, ctes, depth + 1);
+      if (preparing_) {
+        auto op = Binary(n.operation);
+        if (op <= Binary::GreaterEqual) {
+          compatible(a, b, id);
+          fact = boolean(a, b);
+        } else if (op == Binary::Like) {
+          if ((a.kind == FactKind::Known && a.type.kind != ValueKind::Text) ||
+              (b.kind == FactKind::Known && b.type.kind != ValueKind::Text))
+            fail(ErrorKind::TypeMismatch, id, "LIKE");
+          fact = boolean(a, b);
+        } else if (op >= Binary::And)
+          fact = boolean(a, b);
+        else {
+          if ((a.kind == FactKind::Known && !numeric(a.type.kind)) ||
+              (b.kind == FactKind::Known && !numeric(b.type.kind)))
+            fail(ErrorKind::TypeMismatch, id, "arithmetic");
+          if (a.kind == FactKind::NullLiteral ||
+              b.kind == FactKind::NullLiteral)
+            fact = {FactKind::NullLiteral, {}};
+          else if (a.kind == FactKind::Known && b.kind == FactKind::Known)
+            fact = {FactKind::Known,
+                    {a.type.kind == ValueKind::Real ||
+                             b.type.kind == ValueKind::Real
+                         ? ValueKind::Real
+                         : ValueKind::Integer,
+                     nullable(a) || nullable(b) || op == Binary::Divide}};
+        }
+      }
       out(')');
       break;
     }
     case Kind::Not:
     case Kind::IsNull:
-    case Kind::IsNotNull:
+    case Kind::IsNotNull: {
       out('(');
       if (n.kind == Kind::Not)
         out("NOT ");
-      expression(n.a, scope, ctes, depth + 1);
+      auto operand = expression(n.a, scope, ctes, depth + 1);
+      fact = n.kind == Kind::Not
+                 ? boolean(operand)
+                 : Fact{FactKind::Known, {ValueKind::Boolean, false}};
       if (n.kind == Kind::IsNull)
         out(" IS NULL");
       if (n.kind == Kind::IsNotNull)
         out(" IS NOT NULL");
       out(')');
       break;
+    }
     case Kind::Alias:
       if (preparing_ && use != Use::Projection) {
         fail(ErrorKind::InvalidShape, id, "projection alias");
-        return;
+        return {};
       }
-      expression(n.a, scope, ctes, depth + 1);
+      fact = expression(n.a, scope, ctes, depth + 1);
       out(" AS ");
       quote(n.name);
       break;
     case Kind::Order:
       if (preparing_ && use != Use::Ordering) {
         fail(ErrorKind::InvalidShape, id, "ordering");
-        return;
+        return {};
       }
-      expression(n.a, scope, ctes, depth + 1);
+      fact = expression(n.a, scope, ctes, depth + 1, Use::Ordering);
       out(n.flag ? " DESC" : " ASC");
       break;
-    case Kind::Assignment:
+    case Kind::Assignment: {
       if (preparing_ && use != Use::Assignment) {
         fail(ErrorKind::InvalidShape, id, "assignment");
-        return;
+        return {};
       }
-      expression(n.a, scope, ctes, depth + 1, Use::Column);
+      auto target = expression(n.a, scope, ctes, depth + 1, Use::Column);
       out(" = ");
-      expression(n.b, scope, ctes, depth + 1);
+      auto value = expression(n.b, scope, ctes, depth + 1);
+      if (preparing_)
+        assignment(target, value, id);
       break;
-    case Kind::In:
+    }
+    case Kind::In: {
       if (preparing_ && !n.b) {
         fail(ErrorKind::InvalidShape, id, "empty IN");
-        return;
+        return {};
       }
       out('(');
-      expression(n.a, scope, ctes, depth + 1);
+      auto a = expression(n.a, scope, ctes, depth + 1);
       out(" IN (");
-      expressions(n.b, scope, ctes, depth + 1);
+      fact = boolean(a);
+      for (Id l = n.b; l; l = node(l).b) {
+        if (l != n.b)
+          out(", ");
+        auto b = expression(node(l).a, scope, ctes, depth + 2);
+        if (preparing_) {
+          compatible(a, b, id);
+          if (b.kind == FactKind::Unknown)
+            fact = {};
+          else if (nullable(b))
+            fact.type.nullable = true;
+        }
+      }
       out("))");
       break;
+    }
     case Kind::InQuery:
       out('(');
       expression(n.a, scope, ctes, depth + 1);
@@ -391,6 +588,7 @@ class Compiler {
       scalar_query(n.a, scope, ctes, depth + 1, true);
       break;
     case Kind::Exists:
+      fact = {FactKind::Known, {ValueKind::Boolean, false}};
       out("EXISTS ");
       scalar_query(n.a, scope, ctes, depth + 1, false);
       break;
@@ -403,7 +601,7 @@ class Compiler {
           (n.operation == unsigned(Function::Coalesce) ? arity < 2
                                                        : arity != 1)) {
         fail(ErrorKind::InvalidShape, id, "function arity");
-        return;
+        return {};
       }
       out(names[n.operation]);
       out('(');
@@ -411,11 +609,72 @@ class Compiler {
           node(node(n.a).a).kind == Kind::Star) {
         if (preparing_ && node(node(n.a).a).qualifier.length) {
           fail(ErrorKind::InvalidShape, id, "COUNT star");
-          return;
+          return {};
         }
         out('*');
-      } else
-        expressions(n.a, scope, ctes, depth + 1);
+        fact = {FactKind::Known, {ValueKind::Integer, false}};
+      } else {
+        bool first = true;
+        Fact argument;
+        bool coalesce_known = true, coalesce_nonnull = false;
+        bool only_null = true;
+        for (Id l = n.a; l; l = node(l).b) {
+          if (!first)
+            out(", ");
+          auto v = expression(node(l).a, scope, ctes, depth + 2);
+          if (first)
+            argument = v;
+          if (Function(n.operation) == Function::Coalesce) {
+            if (v.kind == FactKind::Unknown)
+              coalesce_known = false;
+            if (v.kind == FactKind::Known) {
+              if (!v.type.nullable)
+                coalesce_nonnull = true;
+              if (only_null) {
+                argument = v;
+                only_null = false;
+              } else if (argument.kind == FactKind::Known &&
+                         !comparable(argument.type.kind, v.type.kind))
+                coalesce_known = false;
+              else if (argument.type.kind == ValueKind::Integer &&
+                       v.type.kind == ValueKind::Real)
+                argument.type.kind = ValueKind::Real;
+            }
+          }
+          first = false;
+        }
+        auto f = Function(n.operation);
+        if (f == Function::Count)
+          fact = {FactKind::Known, {ValueKind::Integer, false}};
+        else if (f == Function::Coalesce) {
+          if (coalesce_known) {
+            fact = only_null ? Fact{FactKind::NullLiteral, {}} : argument;
+            fact.type.nullable = !coalesce_nonnull;
+          }
+        } else if (f == Function::Min || f == Function::Max) {
+          fact = argument;
+          fact.type.nullable = true;
+        } else if (f == Function::Lower || f == Function::Upper) {
+          if (argument.kind == FactKind::Known &&
+              argument.type.kind == ValueKind::Text)
+            fact = argument;
+        } else if (f == Function::Length) {
+          if (argument.kind == FactKind::Known &&
+              (argument.type.kind == ValueKind::Text ||
+               argument.type.kind == ValueKind::Blob))
+            fact = {FactKind::Known, {ValueKind::Integer, nullable(argument)}};
+        } else if (argument.kind == FactKind::Known &&
+                   numeric(argument.type.kind)) {
+          fact = argument;
+          if (f == Function::Avg) {
+            fact.type.kind = ValueKind::Real;
+            fact.type.nullable = true;
+          }
+          if (f == Function::Sum) {
+            fact = {};
+          }
+        }
+      }
       out(')');
       break;
     }
@@ -423,6 +682,9 @@ class Compiler {
       fail(ErrorKind::InvalidShape, id, "expression");
       break;
     }
+    if (preparing_)
+      prepared_.facts[occurrence] = fact;
+    return preparing_ ? fact : prepared_.facts[occurrence];
   }
   constexpr void source(Id id, const CteScope *ctes, unsigned depth) {
     if (!enter(depth, id))
@@ -439,6 +701,10 @@ class Compiler {
             }
       }
       quote(n.name);
+      if (n.qualifier.length) {
+        out(" AS ");
+        quote(n.qualifier);
+      }
       break;
     case Kind::Cte:
       if (preparing_ && !cte_known(n.name, ctes)) {
@@ -469,7 +735,8 @@ class Compiler {
       Id ai = node(a).a;
       if (assignments)
         ai = node(ai).a;
-      if (node(ai).kind != Kind::Column || node(ai).qualifier.length) {
+      if (node(ai).kind != Kind::Column ||
+          (node(ai).qualifier.length && !node(ai).source)) {
         fail(ErrorKind::InvalidShape, ai, "column");
         return;
       }
@@ -477,7 +744,12 @@ class Compiler {
         Id bi = node(b).a;
         if (assignments)
           bi = node(bi).a;
-        if (same(node(ai).name, node(bi).name)) {
+        const auto &x = node(ai);
+        const auto &y = node(bi);
+        bool duplicate = x.registration && y.registration
+                             ? x.source == y.source && x.column == y.column
+                             : same(x.name, y.name);
+        if (duplicate) {
           fail(ErrorKind::DuplicateName, bi, text(node(ai).name));
           return;
         }
@@ -496,9 +768,9 @@ class Compiler {
         fail(ErrorKind::InvalidShape, id, "SELECT");
     } else {
       if (!get(Slot::Source) || node(get(Slot::Source)).kind != Kind::Table ||
-          q.distinct || get(Slot::Group) || get(Slot::Having) ||
-          get(Slot::Order) || get(Slot::Limit) || get(Slot::Offset) ||
-          get(Slot::Joins))
+          node(get(Slot::Source)).qualifier.length || q.distinct ||
+          get(Slot::Group) || get(Slot::Having) || get(Slot::Order) ||
+          get(Slot::Limit) || get(Slot::Offset) || get(Slot::Joins))
         fail(ErrorKind::InvalidShape, id, "write clauses");
       if (q.kind == StatementKind::Insert) {
         if (!get(Slot::Projection) ||
@@ -556,17 +828,29 @@ class Compiler {
       }
       out(' ');
     }
+    std::optional<ProjectionFacts> projection;
+    if (preparing_ && q.kind == StatementKind::Select)
+      for (Id l = q.get(Slot::Projection); l; l = node(l).b)
+        if (node(node(l).a).kind == Kind::Alias) {
+          projection.emplace();
+          projection->list = q.get(Slot::Projection);
+          break;
+        }
     Scope scope{.parent = parent};
+    if (projection)
+      scope.projection = &*projection;
     if (q.get(Slot::Source))
       register_source(q.get(Slot::Source), scope);
     for (Id l = q.get(Slot::Joins); l; l = node(l).b)
-      register_source(node(node(l).a).a, scope);
+      register_source(node(node(l).a).a, scope, node(node(l).a).flag);
+    if (q.kind != StatementKind::Select)
+      scope.write_target = q.get(Slot::Source);
     if (error_.kind != ErrorKind::None)
       return;
     if (q.kind == StatementKind::Select) {
       out(q.distinct ? "SELECT DISTINCT " : "SELECT ");
       expressions(q.get(Slot::Projection), &scope, &ctes, depth + 1,
-                  Use::Projection);
+                  Use::Projection, projection ? &*projection : nullptr);
       if (q.get(Slot::Source)) {
         out(" FROM ");
         source(q.get(Slot::Source), &ctes, depth + 1);
@@ -581,15 +865,26 @@ class Compiler {
         source(n.a, &ctes, depth + 1);
         out(" ON ");
         expression(n.b, &join_scope, &ctes, depth + 1);
+        if (n.flag && join_scope.count)
+          join_scope.sources[join_scope.count - 1].nullable = true;
       }
     } else if (q.kind == StatementKind::Insert) {
       out("INSERT INTO ");
       source(q.get(Slot::Source), &ctes, depth + 1);
       out(" (");
-      expressions(q.get(Slot::Projection), nullptr, &ctes, depth + 1,
+      expressions(q.get(Slot::Projection), &scope, &ctes, depth + 1,
                   Use::Column);
       out(") VALUES (");
-      expressions(q.get(Slot::Values), nullptr, &ctes, depth + 1);
+      Id column_list = q.get(Slot::Projection);
+      for (Id l = q.get(Slot::Values); l; l = node(l).b) {
+        if (l != q.get(Slot::Values))
+          out(", ");
+        auto value = expression(node(l).a, nullptr, &ctes, depth + 2);
+        if (preparing_)
+          assignment(column(node(column_list).a, &scope, true), value,
+                     node(l).a);
+        column_list = node(column_list).b;
+      }
       out(')');
     } else if (q.kind == StatementKind::Update) {
       out("UPDATE ");
@@ -614,6 +909,7 @@ class Compiler {
     }
     if (q.get(Slot::Order)) {
       out(" ORDER BY ");
+      scope.ordering = true;
       expressions(q.get(Slot::Order), &scope, &ctes, depth + 1, Use::Ordering);
     }
     if (q.get(Slot::Limit)) {
@@ -652,6 +948,8 @@ inline void invalid_query_shape(Error) { __builtin_trap(); }
 inline void invalid_query_owner(Error) { __builtin_trap(); }
 inline void query_capacity_exceeded(Error) { __builtin_trap(); }
 inline void conflicting_query_parameter(Error) { __builtin_trap(); }
+inline void invalid_query_type(Error) { __builtin_trap(); }
+inline void invalid_query_source(Error) { __builtin_trap(); }
 inline void invalid_query(Error) { __builtin_trap(); }
 } // namespace liorm::query
 
@@ -681,6 +979,18 @@ consteval auto compile(Build build, Limits limits = {}) -> CompiledQuery {
     case ErrorKind::Capacity:
     case ErrorKind::Depth:
       query_capacity_exceeded(error);
+      break;
+    case ErrorKind::TypeMismatch:
+    case ErrorKind::NullableAssignment:
+    case ErrorKind::UnsupportedType:
+      invalid_query_type(error);
+      break;
+    case ErrorKind::UnknownTable:
+    case ErrorKind::UnknownColumn:
+    case ErrorKind::AmbiguousColumn:
+    case ErrorKind::InvalidSource:
+    case ErrorKind::InvalidRelation:
+      invalid_query_source(error);
       break;
     case ErrorKind::ParameterConflict:
       conflicting_query_parameter(error);
