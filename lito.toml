@@ -1,0 +1,24 @@
+[package]
+name = "liorm"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "liorm"
+module = "liorm"
+archive = "liorm"
+
+[[test]]
+name = "liorm-tests"
+sources = ["tests/main.cpp", "tests/query.cpp", "tests/sqlite.cpp"]
+
+[profile.base]
+exceptions = false
+rtti = false
+
+[dependencies]
+rstd-core = { version = "0.1.9", pub = true }
+
+[dev-dependencies]
+sqlito = { version = "0.1.0", path = "../sqlito" }
+rstd-test = { version = "0.1.9" }
