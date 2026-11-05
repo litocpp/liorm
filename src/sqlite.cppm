@@ -2,6 +2,7 @@ module;
 #include <array>
 #include <optional>
 #include <string_view>
+#include <vector>
 export module liorm:sqlite;
 export import :query;
 
@@ -13,6 +14,7 @@ struct Parameter {
 };
 class CompiledQuery {
   friend class Compiler;
+  friend class ExpandedQuery;
   std::array<rstd::byte, 16384> sql_{};
   std::array<char, 8192> names_{};
   std::array<Parameter, 64> parameters_{};
@@ -43,6 +45,46 @@ public:
     for (unsigned i = 0; i < parameter_count_; ++i)
       if (parameter_name(i) == name)
         return rstd::Some(rstd::usize(parameters_[i].slot));
+    return rstd::None();
+  }
+};
+struct ParameterGroupSlots {
+  // The group occupies count contiguous one-based slots; empty is {0, 0}.
+  rstd::usize first{};
+  rstd::usize count{};
+};
+struct ExpansionLimits {
+  unsigned parameters = 1048576;
+  unsigned sql = 1048576;
+};
+// SQL and parameter metadata are owned; views returned by sql() remain valid
+// only while this object is alive and has not been moved or assigned.
+class ExpandedQuery {
+  friend class Compiler;
+  std::vector<rstd::byte> sql_;
+  CompiledQuery metadata_;
+  std::array<bool, 64> groups_{};
+  std::array<unsigned, 64> counts_{};
+
+public:
+  auto sql() const -> rstd::ref<rstd::str> {
+    return rstd::ref<rstd::str>::from_raw_parts_unchecked(
+        sql_.data(), rstd::usize(sql_.size()));
+  }
+  auto parameter_slot(std::string_view name) const
+      -> rstd::Option<rstd::usize> {
+    for (unsigned i = 0; i < metadata_.parameter_count_; ++i)
+      if (metadata_.parameter_name(i) == name && !groups_[i])
+        return rstd::Some(rstd::usize(metadata_.parameters_[i].slot));
+    return rstd::None();
+  }
+  auto parameter_group(std::string_view name) const
+      -> rstd::Option<ParameterGroupSlots> {
+    for (unsigned i = 0; i < metadata_.parameter_count_; ++i)
+      if (metadata_.parameter_name(i) == name && groups_[i])
+        return rstd::Some(
+            ParameterGroupSlots{rstd::usize(metadata_.parameters_[i].slot),
+                                rstd::usize(counts_[i])});
     return rstd::None();
   }
 };
@@ -91,6 +133,11 @@ class Compiler {
   Error error_{};
   bool preparing_{true};
   unsigned fact_cursor_{};
+  ExpandedQuery *expanded_{};
+  ExpansionLimits expansion_limits_{};
+  std::array<bool, 64> groups_{};
+  std::array<unsigned, 64> group_counts_{};
+  unsigned next_slot_{1};
 
   constexpr auto text(Text t) const -> std::string_view {
     return builder_.text(t);
@@ -122,6 +169,14 @@ class Compiler {
   constexpr void out(char c) {
     if (preparing_ || error_.kind != ErrorKind::None)
       return;
+    if (expanded_) {
+      if (expanded_->sql_.size() >= expansion_limits_.sql) {
+        fail(ErrorKind::Capacity, 0, "sql");
+        return;
+      }
+      expanded_->sql_.push_back(rstd::byte{static_cast<unsigned char>(c)});
+      return;
+    }
     if (result_.sql_size_ >= builder_.limits_.sql) {
       fail(ErrorKind::Capacity, 0, "sql");
       return;
@@ -336,9 +391,14 @@ class Compiler {
       ++n;
     return n;
   }
-  constexpr void parameter(Id id) {
+  constexpr void parameter(Id id, bool group = false) {
     auto n = node(id);
     if (preparing_) {
+      if (group && !expanded_) {
+        fail(ErrorKind::InvalidShape, id,
+             "parameter group requires runtime expansion");
+        return;
+      }
       if (unsigned(n.type.kind) > unsigned(ParameterKind::Blob)) {
         fail(ErrorKind::UnsupportedType, id, text(n.name));
         return;
@@ -348,8 +408,11 @@ class Compiler {
       for (; index < result_.parameter_count_; ++index)
         if (result_.parameter_name(index) == name)
           break;
+      unsigned amount = group ? unsigned(n.integer) : 1;
       if (index < result_.parameter_count_) {
-        if (result_.parameters_[index].type != n.type)
+        if (result_.parameters_[index].type != n.type ||
+            groups_[index] != group ||
+            (group && group_counts_[index] != amount))
           fail(ErrorKind::ParameterConflict, id, name);
       } else {
         if (index >= builder_.limits_.parameters ||
@@ -357,13 +420,33 @@ class Compiler {
           fail(ErrorKind::Capacity, id, "parameters");
           return;
         }
-        result_.parameters_[index] = {index + 1, n.type, result_.name_size_,
+        if (expanded_ &&
+            (next_slot_ > expansion_limits_.parameters + 1ULL ||
+             amount > expansion_limits_.parameters + 1ULL - next_slot_ ||
+             amount > 2147483648ULL - next_slot_)) {
+          fail(ErrorKind::Capacity, id, "parameters");
+          return;
+        }
+        unsigned slot = amount ? next_slot_ : 0;
+        result_.parameters_[index] = {slot, n.type, result_.name_size_,
                                       unsigned(name.size())};
+        groups_[index] = group;
+        group_counts_[index] = amount;
+        next_slot_ += amount;
         for (char c : name)
           result_.names_[result_.name_size_++] = c;
         ++result_.parameter_count_;
       }
-      prepared_.parameter_slots[id] = index + 1;
+      prepared_.parameter_slots[id] = result_.parameters_[index].slot;
+    } else if (group) {
+      unsigned first = prepared_.parameter_slots[id];
+      for (unsigned i = 0;
+           i < unsigned(n.integer) && error_.kind == ErrorKind::None; ++i) {
+        if (i)
+          out(", ");
+        out('?');
+        number(static_cast<long long>(first) + i);
+      }
     } else {
       out('?');
       number(prepared_.parameter_slots[id]);
@@ -573,6 +656,26 @@ class Compiler {
           else if (nullable(b))
             fact.type.nullable = true;
         }
+      }
+      out("))");
+      break;
+    }
+    case Kind::InGroup: {
+      const auto &group = node(n.b);
+      if (!n.b || group.kind != Kind::ParameterGroup) {
+        fail(ErrorKind::InvalidShape, id, "parameter group");
+        return {};
+      }
+      out('(');
+      auto a = expression(n.a, scope, ctes, depth + 1);
+      out(" IN (");
+      parameter(n.b, true);
+      if (preparing_) {
+        Fact b{FactKind::Known, group.type};
+        compatible(a, b, id);
+        fact = group.integer == 0
+                   ? Fact{FactKind::Known, {ValueKind::Boolean, false}}
+                   : boolean(a, b);
       }
       out("))");
       break;
@@ -939,6 +1042,33 @@ class Compiler {
 
 public:
   constexpr explicit Compiler(const QueryBuilder &b) : builder_(b) {}
+  explicit Compiler(const QueryBuilder &b, ExpandedQuery &out,
+                    ExpansionLimits limits)
+      : builder_(b), expanded_(&out), expansion_limits_(limits) {}
+  static auto run_expanded(Query value, ExpansionLimits limits)
+      -> rstd::Result<ExpandedQuery, Error> {
+    if (!value.owner_ || !value.id_)
+      return rstd::Err(Error{.kind = ErrorKind::InvalidHandle});
+    ExpandedQuery result;
+    Compiler c(*value.owner_, result, limits);
+    if (value.owner_->error_.kind != ErrorKind::None)
+      return rstd::Err(Error(value.owner_->error_));
+    c.query(value.id_, nullptr, nullptr, 0);
+    if (c.error_.kind != ErrorKind::None)
+      return rstd::Err(Error(c.error_));
+    c.preparing_ = false;
+    c.query(value.id_, nullptr, nullptr, 0);
+    if (c.error_.kind != ErrorKind::None)
+      return rstd::Err(Error(c.error_));
+    auto valid = rstd::str_::from_utf8(result.sql().as_bytes());
+    if (valid.is_err())
+      return rstd::Err(Error{.kind = ErrorKind::InvalidName});
+    result.metadata_ = c.result_;
+    result.groups_ = c.groups_;
+    result.counts_ = c.group_counts_;
+    return rstd::Ok(rstd::move(result));
+  }
+
   static constexpr auto run(Query value) -> rstd::Result<CompiledQuery, Error> {
     if (!value.owner_ || !value.id_)
       return rstd::Err(Error{.kind = ErrorKind::InvalidHandle});
@@ -971,6 +1101,17 @@ inline void invalid_query(Error) { __builtin_trap(); }
 export namespace liorm::query {
 constexpr auto try_compile(Query query) -> rstd::Result<CompiledQuery, Error> {
   return Compiler::run(query);
+}
+inline auto try_compile_expanded(Query query, ExpansionLimits limits = {})
+    -> rstd::Result<ExpandedQuery, Error> {
+  return Compiler::run_expanded(query, limits);
+}
+template <class Build>
+auto try_compile_expanded(Build build, ExpansionLimits expansion = {},
+                          Limits limits = {})
+    -> rstd::Result<ExpandedQuery, Error> {
+  QueryBuilder builder(limits);
+  return try_compile_expanded(build(builder), expansion);
 }
 template <class Build>
 constexpr auto try_compile(Build build, Limits limits = {})

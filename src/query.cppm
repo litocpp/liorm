@@ -83,6 +83,17 @@ enum class Binary {
 };
 class QueryBuilder;
 class Query;
+class ParameterGroup {
+  friend class QueryBuilder;
+  friend class Expr;
+  QueryBuilder *owner_{};
+  unsigned id_{};
+  constexpr ParameterGroup(QueryBuilder *owner, unsigned id)
+      : owner_(owner), id_(id) {}
+
+public:
+  constexpr ParameterGroup() = default;
+};
 class Expr {
   friend class QueryBuilder;
   friend class BoundTable;
@@ -101,6 +112,7 @@ public:
   constexpr auto like(Expr other) const -> Expr;
   constexpr auto in(std::span<const Expr> values) const -> Expr;
   constexpr auto in(Query query) const -> Expr;
+  constexpr auto in(ParameterGroup values) const -> Expr;
   constexpr auto set(Expr value) const -> Expr;
   constexpr auto binary(Binary op, Expr other) const -> Expr;
   constexpr auto operator!() const -> Expr;
@@ -181,6 +193,7 @@ enum class Kind {
   Cte,
   Derived,
   Parameter,
+  ParameterGroup,
   Integer,
   Text,
   Null,
@@ -189,6 +202,7 @@ enum class Kind {
   IsNull,
   IsNotNull,
   In,
+  InGroup,
   InQuery,
   Scalar,
   Exists,
@@ -289,6 +303,7 @@ class QueryBuilder {
   friend class Expr;
   friend class Query;
   friend class Compiler;
+  friend class ParameterGroup;
   friend class BoundSchema;
   friend class BoundTable;
   schema::Registry schemas_;
@@ -350,6 +365,21 @@ class QueryBuilder {
     return Query(this, query_count_++);
   }
   constexpr auto check(Expr value) -> Id {
+    if (!value.owner_ || !value.id_) {
+      fail(ErrorKind::InvalidHandle);
+      return 0;
+    }
+    if (value.owner_ != this) {
+      fail(ErrorKind::ForeignOwner);
+      return 0;
+    }
+    if (value.id_ >= node_count_) {
+      fail(ErrorKind::InvalidHandle);
+      return 0;
+    }
+    return value.id_;
+  }
+  constexpr auto check(ParameterGroup value) -> Id {
     if (!value.owner_ || !value.id_) {
       fail(ErrorKind::InvalidHandle);
       return 0;
@@ -577,6 +607,27 @@ public:
       return {};
     }
   }
+  // Groups sharing a name must have the same type and count. Scalar parameters
+  // and groups cannot share a name.
+  template <class T>
+  constexpr auto param_group(std::string_view name, rstd::usize count)
+      -> ParameterGroup {
+    if constexpr (requires { ParameterTraits<T>::type; }) {
+      auto size = count.to_primitive();
+      if (size > 2147483647ULL) {
+        fail(ErrorKind::Capacity, 0, "parameters");
+        return {};
+      }
+      return ParameterGroup(this,
+                            add(Node{.kind = Kind::ParameterGroup,
+                                     .name = store(name),
+                                     .integer = static_cast<long long>(size),
+                                     .type = ParameterTraits<T>::type}));
+    } else {
+      fail(ErrorKind::UnsupportedType, 0, name);
+      return {};
+    }
+  }
   constexpr auto integer(long long value) -> Expr {
     return Expr(this, add(Node{.kind = Kind::Integer, .integer = value}));
   }
@@ -775,6 +826,13 @@ constexpr auto Expr::in(std::span<const Expr> values) const -> Expr {
   return Expr(owner_, owner_->add(Node{.kind = Kind::In,
                                        .a = owner_->check(*this),
                                        .b = owner_->list(values)}));
+}
+constexpr auto Expr::in(ParameterGroup values) const -> Expr {
+  if (!owner_)
+    return {};
+  return Expr(owner_, owner_->add(Node{.kind = Kind::InGroup,
+                                       .a = owner_->check(*this),
+                                       .b = owner_->check(values)}));
 }
 constexpr auto Expr::in(Query query) const -> Expr {
   if (!owner_)
