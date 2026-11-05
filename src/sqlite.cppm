@@ -762,7 +762,8 @@ class Compiler {
     auto get = [&](Slot s) { return q.get(s); };
     if (q.kind == StatementKind::Select) {
       if (!get(Slot::Projection) || get(Slot::Values) || get(Slot::Sets) ||
-          q.allow_all || (get(Slot::Joins) && !get(Slot::Source)) ||
+          get(Slot::Conflict) || get(Slot::Returning) || q.allow_all ||
+          (get(Slot::Joins) && !get(Slot::Source)) ||
           (get(Slot::Having) && !get(Slot::Group)) ||
           (get(Slot::Offset) && !get(Slot::Limit)))
         fail(ErrorKind::InvalidShape, id, "SELECT");
@@ -778,8 +779,11 @@ class Compiler {
             get(Slot::Where) || get(Slot::Sets) || q.allow_all)
           fail(ErrorKind::InvalidShape, id, "INSERT");
         unique_columns(get(Slot::Projection), false);
+        if (get(Slot::Conflict))
+          unique_columns(get(Slot::Conflict), false);
       } else {
-        if (get(Slot::Projection) || get(Slot::Values) ||
+        if (get(Slot::Projection) || get(Slot::Values) || get(Slot::Conflict) ||
+            (q.kind == StatementKind::Delete && get(Slot::Returning)) ||
             (q.kind == StatementKind::Update ? !get(Slot::Sets)
                                              : bool(get(Slot::Sets))))
           fail(ErrorKind::InvalidShape, id, "UPDATE/DELETE");
@@ -886,6 +890,12 @@ class Compiler {
         column_list = node(column_list).b;
       }
       out(')');
+      if (q.get(Slot::Conflict)) {
+        out(" ON CONFLICT (");
+        expressions(q.get(Slot::Conflict), &scope, &ctes, depth + 1,
+                    Use::Column);
+        out(") DO NOTHING");
+      }
     } else if (q.kind == StatementKind::Update) {
       out("UPDATE ");
       source(q.get(Slot::Source), &ctes, depth + 1);
@@ -911,6 +921,11 @@ class Compiler {
       out(" ORDER BY ");
       scope.ordering = true;
       expressions(q.get(Slot::Order), &scope, &ctes, depth + 1, Use::Ordering);
+    }
+    if (q.get(Slot::Returning)) {
+      out(" RETURNING ");
+      expressions(q.get(Slot::Returning), &scope, &ctes, depth + 1,
+                  Use::Column);
     }
     if (q.get(Slot::Limit)) {
       out(" LIMIT ");

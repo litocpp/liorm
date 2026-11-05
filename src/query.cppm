@@ -129,6 +129,21 @@ public:
   constexpr auto order_by(std::span<const Expr> values) const -> Query;
   constexpr auto values(std::span<const Expr> values) const -> Query;
   constexpr auto set(std::span<const Expr> values) const -> Query;
+  constexpr auto on_conflict_do_nothing(std::span<const Expr> columns) const
+      -> Query;
+  constexpr auto returning(std::span<const Expr> columns) const -> Query;
+  template <class... T>
+    requires((std::is_same_v<T, Expr>) && ...)
+  constexpr auto on_conflict_do_nothing(T... items) const -> Query {
+    const std::array<Expr, sizeof...(T)> list{items...};
+    return on_conflict_do_nothing(std::span<const Expr>(list));
+  }
+  template <class... T>
+    requires((std::is_same_v<T, Expr>) && ...)
+  constexpr auto returning(T... items) const -> Query {
+    const std::array<Expr, sizeof...(T)> list{items...};
+    return returning(std::span<const Expr>(list));
+  }
   template <class... T>
     requires((std::is_same_v<T, Expr>) && ...)
   constexpr auto group_by(T... items) const -> Query {
@@ -213,6 +228,8 @@ enum class Slot {
   Ctes,
   Values,
   Sets,
+  Conflict,
+  Returning,
   Count
 };
 struct QueryData {
@@ -813,6 +830,19 @@ constexpr auto Query::set(std::span<const Expr> x) const -> Query {
   if (owner_ && x.empty())
     owner_->fail(ErrorKind::InvalidShape, id_, "empty SET");
   return owner_ ? owner_->change(*this, Slot::Sets, owner_->list(x)) : Query{};
+}
+constexpr auto
+Query::on_conflict_do_nothing(std::span<const Expr> columns) const -> Query {
+  if (owner_ && columns.empty())
+    owner_->fail(ErrorKind::InvalidShape, id_, "empty conflict target");
+  return owner_ ? owner_->change(*this, Slot::Conflict, owner_->list(columns))
+                : Query{};
+}
+constexpr auto Query::returning(std::span<const Expr> columns) const -> Query {
+  if (owner_ && columns.empty())
+    owner_->fail(ErrorKind::InvalidShape, id_, "empty RETURNING");
+  return owner_ ? owner_->change(*this, Slot::Returning, owner_->list(columns))
+                : Query{};
 }
 constexpr auto Query::distinct() const -> Query {
   if (!owner_)
