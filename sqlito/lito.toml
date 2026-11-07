@@ -1,0 +1,21 @@
+[package]
+name = "liorm-sqlito"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+standard = "c++23"
+
+[lib]
+name = "liorm-sqlito"
+module = "liorm.sqlito"
+archive = "liorm_sqlito"
+
+[dependencies]
+liorm = { version = "0.1.0", pub = true }
+sqlito = { version = "0.1.0", pub = true }
+
+[dev-dependencies]
+rstd-test = { version = "0.1.9" }
+
+[[test]]
+name = "liorm-sqlito-tests"
+sources = ["tests/main.cpp", "tests/row.cpp", "tests/write.cpp", "tests/module.cppm", "tests/module_consumer.cpp", "tests/active.cpp"]

@@ -2,15 +2,20 @@ module;
 #include <array>
 #include <span>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
+#include <utility>
 export module liorm:query;
-export import :schema;
+export import :table;
 
 namespace liorm::query {
 class Compiler;
 }
 
 export namespace liorm::query {
+template <auto Member>
+inline constexpr unsigned char member_parameter_identity{};
+
 enum class ErrorKind {
   None,
   Capacity,
@@ -227,6 +232,7 @@ struct Node {
   bool flag{};
   Id source{};
   unsigned registration{}, table{}, column{};
+  const void *member_identity{};
 };
 enum class StatementKind { Select, Insert, Update, Delete };
 enum class Slot {
@@ -249,7 +255,7 @@ enum class Slot {
 struct QueryData {
   StatementKind kind{};
   std::array<Id, static_cast<unsigned>(Slot::Count)> slots{};
-  bool distinct{}, allow_all{};
+  bool distinct{}, allow_all{}, default_values{};
   constexpr auto get(Slot slot) const -> Id {
     return slots[static_cast<unsigned>(slot)];
   }
@@ -261,6 +267,7 @@ class Compiler;
 } // namespace liorm::query
 
 export namespace liorm::query {
+template <class Model> class TypedBoundTable;
 class BoundTable {
   friend class QueryBuilder;
   friend class BoundSchema;
@@ -274,6 +281,87 @@ public:
   constexpr auto source() const -> Expr;
   constexpr auto col(std::string_view name) const -> Expr;
 };
+template <class Model> class TypedBoundTable {
+  friend class BoundSchema;
+  BoundTable table_;
+  constexpr explicit TypedBoundTable(BoundTable table) : table_(table) {}
+
+public:
+  constexpr TypedBoundTable() = default;
+  constexpr auto source() const -> Expr { return table_.source(); }
+  constexpr operator BoundTable() const { return table_; }
+  template <auto Member>
+    requires requires {
+      requires std::is_same_v<
+          typename schema::MemberPointer<decltype(Member)>::owner_type, Model>;
+      schema::column_name<Member>();
+    }
+  constexpr auto col() const -> Expr {
+    return table_.col(schema::column_name<Member>());
+  }
+};
+
+template <class Model> struct ModelGroup {
+  using model_type = Model;
+  using definition =
+      decltype(liorm_table_definition(static_cast<Model *>(nullptr)));
+  static constexpr std::size_t count = definition::field_count;
+};
+template <std::size_t N> struct ColumnsGroup {
+  static constexpr std::size_t count = N;
+};
+template <class Segment, std::size_t Offset> struct ProjectionGroup {
+  using segment_type = Segment;
+  static constexpr std::size_t offset = Offset;
+  static constexpr std::size_t count = Segment::count;
+};
+template <class... Segments> struct ProjectionLayout {
+  static constexpr std::size_t count = (std::size_t{0} + ... + Segments::count);
+  template <std::size_t I> static consteval auto offset() -> std::size_t {
+    static_assert(I < sizeof...(Segments));
+    return []<std::size_t... N>(std::index_sequence<N...>) {
+      return (std::size_t{0} + ... +
+              std::tuple_element_t<N, std::tuple<Segments...>>::count);
+    }(std::make_index_sequence<I>{});
+  }
+  template <std::size_t I> constexpr auto group() const {
+    return ProjectionGroup<std::tuple_element_t<I, std::tuple<Segments...>>,
+                           offset<I>()>{};
+  }
+};
+
+template <class Model, std::size_t... I>
+constexpr auto model_projection(TypedBoundTable<Model> table,
+                                std::index_sequence<I...>) {
+  using Definition = typename ModelGroup<Model>::definition;
+  return std::array<Expr, sizeof...(I)>{
+      table.template col<Definition::template field<I>::member>()...};
+}
+template <class Model>
+constexpr auto projection_values(ModelGroup<Model>,
+                                 TypedBoundTable<Model> table) {
+  return model_projection(table,
+                          std::make_index_sequence<ModelGroup<Model>::count>{});
+}
+template <std::size_t N>
+constexpr auto projection_values(ColumnsGroup<N>, std::array<Expr, N> values) {
+  return values;
+}
+template <class... Segments, class... Args>
+  requires(sizeof...(Segments) == sizeof...(Args)) &&
+          (requires(Segments segment, Args arg) {
+            projection_values(segment, arg);
+          } && ...)
+constexpr auto project(ProjectionLayout<Segments...>, Args... args) {
+  std::array<Expr, ProjectionLayout<Segments...>::count> result{};
+  std::size_t index = 0;
+  auto append = [&](auto values) {
+    for (auto value : values)
+      result[index++] = value;
+  };
+  (append(projection_values(Segments{}, args)), ...);
+  return result;
+}
 class BoundForeignKey {
   friend class QueryBuilder;
   friend class BoundSchema;
@@ -297,6 +385,10 @@ public:
   constexpr BoundSchema() = default;
   constexpr auto table(std::string_view name, std::string_view alias = {}) const
       -> BoundTable;
+  // Every mapped column must have the same type; extra columns are allowed.
+  template <class Model>
+  constexpr auto table(std::string_view alias = {}) const
+      -> TypedBoundTable<Model>;
   constexpr auto foreign_key(std::string_view name) const -> BoundForeignKey;
 };
 class QueryBuilder {
@@ -607,6 +699,30 @@ public:
       return {};
     }
   }
+  template <auto Member, class T>
+    requires requires { schema::column_name<Member>(); }
+  constexpr auto member_param(std::string_view name) -> Expr {
+    if constexpr (requires { ParameterTraits<T>::type; })
+      return member_param<Member>(name, ParameterTraits<T>::type);
+    else {
+      fail(ErrorKind::UnsupportedType, 0, name);
+      return {};
+    }
+  }
+  template <auto Member>
+    requires requires { schema::column_name<Member>(); }
+  constexpr auto member_param(std::string_view name, ParameterType type)
+      -> Expr {
+    if (!valid_type(type)) {
+      fail(ErrorKind::UnsupportedType, 0, name);
+      return {};
+    }
+    return Expr(
+        this, add(Node{.kind = Kind::Parameter,
+                       .name = store(name),
+                       .type = type,
+                       .member_identity = &member_parameter_identity<Member>}));
+  }
   // Groups sharing a name must have the same type and count. Scalar parameters
   // and groups cannot share a name.
   template <class T>
@@ -668,6 +784,11 @@ public:
     data.get(Slot::Projection) = list(columns);
     return add_query(data);
   }
+  constexpr auto insert_default_values(Expr table) -> Query {
+    QueryData data{.kind = StatementKind::Insert, .default_values = true};
+    data.get(Slot::Source) = check(table);
+    return add_query(data);
+  }
   template <class... T>
     requires((std::is_same_v<T, Expr>) && ...)
   constexpr auto insert_into(Expr table, T... columns) -> Query {
@@ -725,6 +846,32 @@ constexpr auto BoundSchema::table(std::string_view name,
   if (!alias.empty())
     n.qualifier = owner_->store(alias);
   return BoundTable(owner_, owner_->add(n));
+}
+template <class Model>
+constexpr auto BoundSchema::table(std::string_view alias) const
+    -> TypedBoundTable<Model> {
+  using Definition = typename ModelGroup<Model>::definition;
+  auto bound = table(Definition::name.view(), alias);
+  if (!owner_ || !bound.source_)
+    return {};
+  auto table_id = owner_->nodes_[bound.source_].table;
+  bool valid = true;
+  [&]<std::size_t... I>(std::index_sequence<I...>) {
+    auto check = [&]<class Field>() {
+      auto id = owner_->schemas_.find_column(table_id, Field::name.view());
+      if (!id) {
+        owner_->fail(ErrorKind::UnknownColumn, bound.source_,
+                     Field::name.view());
+        valid = false;
+      } else if (owner_->schemas_.column(*id).type != Field::type) {
+        owner_->fail(ErrorKind::TypeMismatch, bound.source_,
+                     Field::name.view());
+        valid = false;
+      }
+    };
+    (check.template operator()<typename Definition::template field<I>>(), ...);
+  }(std::make_index_sequence<Definition::field_count>{});
+  return valid ? TypedBoundTable<Model>(bound) : TypedBoundTable<Model>();
 }
 constexpr auto BoundSchema::foreign_key(std::string_view name) const
     -> BoundForeignKey {

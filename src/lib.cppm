@@ -1,5 +1,10 @@
 export module liorm;
 export import :value;
 export import :schema;
+export import :table;
+export import :active;
 export import :query;
+export import :row;
 export import :sqlite;
+export import :bind;
+export import :write;

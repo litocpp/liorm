@@ -1,0 +1,9 @@
+[package]
+name = "liorm-macro"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+standard = "c++23"
+
+[pmacro]
+module = "liorm.macro"
+sources = ["src/lib.cppm"]

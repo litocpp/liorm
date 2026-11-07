@@ -18,6 +18,7 @@ class CompiledQuery {
   std::array<rstd::byte, 16384> sql_{};
   std::array<char, 8192> names_{};
   std::array<Parameter, 64> parameters_{};
+  std::array<const void *, 64> member_identities_{};
   unsigned sql_size_{}, name_size_{}, parameter_count_{};
   constexpr CompiledQuery() = default;
 
@@ -40,6 +41,15 @@ public:
     auto p = parameters_[index];
     return {names_.data() + p.name_offset, p.name_length};
   }
+  constexpr auto parameter_has_member(unsigned index) const -> bool {
+    return index < parameter_count_ && member_identities_[index] != nullptr;
+  }
+  template <auto Member>
+  constexpr auto parameter_is(unsigned index) const -> bool {
+    return index < parameter_count_ &&
+           member_identities_[index] == &member_parameter_identity<Member>;
+  }
+  constexpr auto parameter_is_group(unsigned) const -> bool { return false; }
   constexpr auto parameter_slot(std::string_view name) const
       -> rstd::Option<rstd::usize> {
     for (unsigned i = 0; i < parameter_count_; ++i)
@@ -70,6 +80,24 @@ public:
   auto sql() const -> rstd::ref<rstd::str> {
     return rstd::ref<rstd::str>::from_raw_parts_unchecked(
         sql_.data(), rstd::usize(sql_.size()));
+  }
+  auto parameter_count() const -> unsigned {
+    return metadata_.parameter_count();
+  }
+  auto parameter(unsigned index) const -> rstd::Option<Parameter> {
+    return metadata_.parameter(index);
+  }
+  auto parameter_name(unsigned index) const -> std::string_view {
+    return metadata_.parameter_name(index);
+  }
+  auto parameter_has_member(unsigned index) const -> bool {
+    return metadata_.parameter_has_member(index);
+  }
+  template <auto Member> auto parameter_is(unsigned index) const -> bool {
+    return metadata_.template parameter_is<Member>(index);
+  }
+  auto parameter_is_group(unsigned index) const -> bool {
+    return index < metadata_.parameter_count_ && groups_[index];
   }
   auto parameter_slot(std::string_view name) const
       -> rstd::Option<rstd::usize> {
@@ -411,6 +439,7 @@ class Compiler {
       unsigned amount = group ? unsigned(n.integer) : 1;
       if (index < result_.parameter_count_) {
         if (result_.parameters_[index].type != n.type ||
+            result_.member_identities_[index] != n.member_identity ||
             groups_[index] != group ||
             (group && group_counts_[index] != amount))
           fail(ErrorKind::ParameterConflict, id, name);
@@ -430,6 +459,7 @@ class Compiler {
         unsigned slot = amount ? next_slot_ : 0;
         result_.parameters_[index] = {slot, n.type, result_.name_size_,
                                       unsigned(name.size())};
+        result_.member_identities_[index] = n.member_identity;
         groups_[index] = group;
         group_counts_[index] = amount;
         next_slot_ += amount;
@@ -866,7 +896,7 @@ class Compiler {
     if (q.kind == StatementKind::Select) {
       if (!get(Slot::Projection) || get(Slot::Values) || get(Slot::Sets) ||
           get(Slot::Conflict) || get(Slot::Returning) || q.allow_all ||
-          (get(Slot::Joins) && !get(Slot::Source)) ||
+          q.default_values || (get(Slot::Joins) && !get(Slot::Source)) ||
           (get(Slot::Having) && !get(Slot::Group)) ||
           (get(Slot::Offset) && !get(Slot::Limit)))
         fail(ErrorKind::InvalidShape, id, "SELECT");
@@ -877,15 +907,19 @@ class Compiler {
           get(Slot::Limit) || get(Slot::Offset) || get(Slot::Joins))
         fail(ErrorKind::InvalidShape, id, "write clauses");
       if (q.kind == StatementKind::Insert) {
-        if (!get(Slot::Projection) ||
-            count(get(Slot::Projection)) != count(get(Slot::Values)) ||
+        if ((q.default_values && (get(Slot::Projection) || get(Slot::Values) ||
+                                  get(Slot::Conflict))) ||
+            (!q.default_values &&
+             (!get(Slot::Projection) ||
+              count(get(Slot::Projection)) != count(get(Slot::Values)))) ||
             get(Slot::Where) || get(Slot::Sets) || q.allow_all)
           fail(ErrorKind::InvalidShape, id, "INSERT");
         unique_columns(get(Slot::Projection), false);
         if (get(Slot::Conflict))
           unique_columns(get(Slot::Conflict), false);
       } else {
-        if (get(Slot::Projection) || get(Slot::Values) || get(Slot::Conflict) ||
+        if (q.default_values || get(Slot::Projection) || get(Slot::Values) ||
+            get(Slot::Conflict) ||
             (q.kind == StatementKind::Delete && get(Slot::Returning)) ||
             (q.kind == StatementKind::Update ? !get(Slot::Sets)
                                              : bool(get(Slot::Sets))))
@@ -978,21 +1012,25 @@ class Compiler {
     } else if (q.kind == StatementKind::Insert) {
       out("INSERT INTO ");
       source(q.get(Slot::Source), &ctes, depth + 1);
-      out(" (");
-      expressions(q.get(Slot::Projection), &scope, &ctes, depth + 1,
-                  Use::Column);
-      out(") VALUES (");
-      Id column_list = q.get(Slot::Projection);
-      for (Id l = q.get(Slot::Values); l; l = node(l).b) {
-        if (l != q.get(Slot::Values))
-          out(", ");
-        auto value = expression(node(l).a, nullptr, &ctes, depth + 2);
-        if (preparing_)
-          assignment(column(node(column_list).a, &scope, true), value,
-                     node(l).a);
-        column_list = node(column_list).b;
+      if (q.default_values) {
+        out(" DEFAULT VALUES");
+      } else {
+        out(" (");
+        expressions(q.get(Slot::Projection), &scope, &ctes, depth + 1,
+                    Use::Column);
+        out(") VALUES (");
+        Id column_list = q.get(Slot::Projection);
+        for (Id l = q.get(Slot::Values); l; l = node(l).b) {
+          if (l != q.get(Slot::Values))
+            out(", ");
+          auto value = expression(node(l).a, nullptr, &ctes, depth + 2);
+          if (preparing_)
+            assignment(column(node(column_list).a, &scope, true), value,
+                       node(l).a);
+          column_list = node(column_list).b;
+        }
+        out(')');
       }
-      out(')');
       if (q.get(Slot::Conflict)) {
         out(" ON CONFLICT (");
         expressions(q.get(Slot::Conflict), &scope, &ctes, depth + 1,
