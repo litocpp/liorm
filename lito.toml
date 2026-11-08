@@ -10,7 +10,7 @@ archive = "liorm"
 
 [[test]]
 name = "liorm-tests"
-sources = ["tests/main.cpp", "tests/query.cpp", "tests/sqlite.cpp", "tests/schema.cpp", "tests/schema_query.cpp", "tests/schema_sqlite.cpp", "tests/groups.cpp", "tests/bulk.cpp", "tests/active.cpp", "tests/active_write.cpp"]
+sources = ["tests/main.cpp", "tests/query.cpp", "tests/sqlite.cpp", "tests/schema.cpp", "tests/schema_query.cpp", "tests/schema_sqlite.cpp", "tests/groups.cpp", "tests/bulk.cpp", "tests/window.cpp", "tests/active.cpp", "tests/active_write.cpp"]
 
 [profile.base]
 exceptions = false

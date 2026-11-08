@@ -139,7 +139,7 @@ struct Scope {
   std::array<Source, 128> sources{};
   Id write_target{};
   const ProjectionFacts *projection{};
-  bool ordering{}, conflict_update{};
+  bool ordering{}, conflict_update{}, window_projection{};
   unsigned count{};
 };
 struct CteScope {
@@ -743,6 +743,21 @@ class Compiler {
       out("EXISTS ");
       scalar_query(n.a, scope, ctes, depth + 1, false);
       break;
+    case Kind::RowNumber: {
+      if (preparing_ && (!scope || !scope->window_projection || !n.a)) {
+        fail(ErrorKind::InvalidShape, id, "window projection");
+        return {};
+      }
+      fact = {FactKind::Known, {ValueKind::Integer, false}};
+      out("ROW_NUMBER() OVER (ORDER BY ");
+      Scope ordering_scope = scope ? *scope : Scope{};
+      ordering_scope.window_projection = false;
+      ordering_scope.ordering = false;
+      ordering_scope.projection = nullptr;
+      expressions(n.a, &ordering_scope, ctes, depth + 1, Use::Ordering);
+      out(')');
+      break;
+    }
     case Kind::Function: {
       constexpr std::string_view names[] = {
           "COUNT", "SUM",   "AVG",    "MIN",      "MAX",
@@ -765,6 +780,17 @@ class Compiler {
         out('*');
         fact = {FactKind::Known, {ValueKind::Integer, false}};
       } else {
+        auto f = Function(n.operation);
+        bool aggregate =
+            f == Function::Count || f == Function::Sum || f == Function::Avg ||
+            ((f == Function::Min || f == Function::Max) && arity == 1);
+        std::optional<Scope> aggregate_scope;
+        const Scope *argument_scope = scope;
+        if (aggregate && scope) {
+          aggregate_scope.emplace(*scope);
+          aggregate_scope->window_projection = false;
+          argument_scope = &*aggregate_scope;
+        }
         bool first = true;
         Fact argument;
         bool coalesce_known = true, coalesce_nonnull = false;
@@ -772,7 +798,7 @@ class Compiler {
         for (Id l = n.a; l; l = node(l).b) {
           if (!first)
             out(", ");
-          auto v = expression(node(l).a, scope, ctes, depth + 2);
+          auto v = expression(node(l).a, argument_scope, ctes, depth + 2);
           if (first)
             argument = v;
           if (Function(n.operation) == Function::Coalesce) {
@@ -794,7 +820,6 @@ class Compiler {
           }
           first = false;
         }
-        auto f = Function(n.operation);
         if (f == Function::Count)
           fact = {FactKind::Known, {ValueKind::Integer, false}};
         else if (f == Function::Coalesce) {
@@ -1063,7 +1088,9 @@ class Compiler {
       return;
     if (q.kind == StatementKind::Select) {
       out(q.distinct ? "SELECT DISTINCT " : "SELECT ");
-      expressions(q.get(Slot::Projection), &scope, &ctes, depth + 1,
+      Scope projection_scope = scope;
+      projection_scope.window_projection = true;
+      expressions(q.get(Slot::Projection), &projection_scope, &ctes, depth + 1,
                   Use::Projection, projection ? &*projection : nullptr);
       if (q.get(Slot::Source)) {
         out(" FROM ");

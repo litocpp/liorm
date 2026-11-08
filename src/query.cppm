@@ -228,6 +228,7 @@ enum class Kind {
   Scalar,
   Exists,
   Function,
+  RowNumber,
   Alias,
   Order,
   Assignment,
@@ -796,6 +797,19 @@ public:
   constexpr auto function(Function f, T... args) -> Expr {
     const std::array<Expr, sizeof...(T)> values{args...};
     return function(f, values);
+  }
+  // Only SELECT projection scalar expressions may contain this window call.
+  // The nonempty ordering list accepts ordinary expressions and asc()/desc().
+  constexpr auto row_number(std::span<const Expr> ordering) -> Expr {
+    if (ordering.empty())
+      fail(ErrorKind::InvalidShape, 0, "empty window ordering");
+    return Expr(this, add(Node{.kind = Kind::RowNumber, .a = list(ordering)}));
+  }
+  template <class... T>
+    requires((std::is_same_v<T, Expr>) && ...)
+  constexpr auto row_number(T... ordering) -> Expr {
+    const std::array<Expr, sizeof...(T)> list{ordering...};
+    return row_number(std::span<const Expr>(list));
   }
   constexpr auto select(std::span<const Expr> values) -> Query {
     QueryData data;
