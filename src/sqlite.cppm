@@ -139,7 +139,7 @@ struct Scope {
   std::array<Source, 128> sources{};
   Id write_target{};
   const ProjectionFacts *projection{};
-  bool ordering{};
+  bool ordering{}, conflict_update{};
   unsigned count{};
 };
 struct CteScope {
@@ -549,6 +549,24 @@ class Compiler {
       }
       quote(n.name);
       break;
+    case Kind::Excluded:
+      if (preparing_) {
+        if (!scope || !scope->conflict_update || !scope->write_target || !n.a ||
+            node(n.a).kind != Kind::Column) {
+          fail(ErrorKind::InvalidShape, id, "excluded scope");
+          return {};
+        }
+        // SQLite resolves a real target named excluded before its proposed-row
+        // pseudo-table. Write aliases are not supported by this API yet.
+        if (same_name(text(node(scope->write_target).name), "excluded")) {
+          fail(ErrorKind::InvalidShape, id, "excluded target name");
+          return {};
+        }
+        fact = column(n.a, scope, true);
+      }
+      out("\"excluded\".");
+      quote(node(n.a).name);
+      break;
     case Kind::Star:
       if (preparing_ && use != Use::Projection) {
         fail(ErrorKind::InvalidShape, id, "star");
@@ -889,14 +907,49 @@ class Compiler {
       }
     }
   }
+  constexpr void group_values(Id id, Id columns, const Scope *scope,
+                              unsigned depth) {
+    if (!enter(depth, id))
+      return;
+    auto groups = node(id).a;
+    if (preparing_) {
+      // One validation per column, not per expanded cell: the AST and facts
+      // remain bounded independently of the number of VALUES rows.
+      for (Id l = groups; l && error_.kind == ErrorKind::None;
+           l = node(l).b, columns = node(columns).b) {
+        auto group_id = node(l).a;
+        const auto &group = node(group_id);
+        parameter(group_id, true);
+        assignment(column(node(columns).a, scope, true),
+                   Fact{FactKind::Known, group.type}, group_id);
+      }
+      return;
+    }
+    auto rows = unsigned(node(node(groups).a).integer);
+    for (unsigned row = 0; row < rows && error_.kind == ErrorKind::None;
+         ++row) {
+      if (row)
+        out(", ");
+      out('(');
+      for (Id l = groups; l && error_.kind == ErrorKind::None; l = node(l).b) {
+        if (l != groups)
+          out(", ");
+        out('?');
+        number(static_cast<long long>(prepared_.parameter_slots[node(l).a]) +
+               row);
+      }
+      out(')');
+    }
+  }
   constexpr void shape(const QueryData &q, Id id) {
     if (!preparing_)
       return;
     auto get = [&](Slot s) { return q.get(s); };
     if (q.kind == StatementKind::Select) {
       if (!get(Slot::Projection) || get(Slot::Values) || get(Slot::Sets) ||
-          get(Slot::Conflict) || get(Slot::Returning) || q.allow_all ||
-          q.default_values || (get(Slot::Joins) && !get(Slot::Source)) ||
+          get(Slot::Conflict) || get(Slot::ConflictSets) ||
+          get(Slot::Returning) || q.allow_all || q.default_values ||
+          (get(Slot::Joins) && !get(Slot::Source)) ||
           (get(Slot::Having) && !get(Slot::Group)) ||
           (get(Slot::Offset) && !get(Slot::Limit)))
         fail(ErrorKind::InvalidShape, id, "SELECT");
@@ -907,19 +960,39 @@ class Compiler {
           get(Slot::Limit) || get(Slot::Offset) || get(Slot::Joins))
         fail(ErrorKind::InvalidShape, id, "write clauses");
       if (q.kind == StatementKind::Insert) {
-        if ((q.default_values && (get(Slot::Projection) || get(Slot::Values) ||
-                                  get(Slot::Conflict))) ||
+        auto values = get(Slot::Values);
+        bool grouped = values && node(values).kind == Kind::ValuesGroups;
+        auto inputs = grouped ? node(values).a : values;
+        if ((q.default_values &&
+             (get(Slot::Projection) || values || get(Slot::Conflict) ||
+              get(Slot::ConflictSets))) ||
             (!q.default_values &&
-             (!get(Slot::Projection) ||
-              count(get(Slot::Projection)) != count(get(Slot::Values)))) ||
+             (!get(Slot::Projection) || !inputs ||
+              count(get(Slot::Projection)) != count(inputs))) ||
+            (get(Slot::ConflictSets) && !get(Slot::Conflict)) ||
             get(Slot::Where) || get(Slot::Sets) || q.allow_all)
           fail(ErrorKind::InvalidShape, id, "INSERT");
+        if (grouped) {
+          long long rows = 0;
+          for (Id l = inputs; l && error_.kind == ErrorKind::None;
+               l = node(l).b) {
+            const auto &group = node(node(l).a);
+            if (group.kind != Kind::ParameterGroup || group.integer <= 0 ||
+                (rows && rows != group.integer)) {
+              fail(ErrorKind::InvalidShape, id, "VALUES groups");
+              break;
+            }
+            rows = group.integer;
+          }
+        }
         unique_columns(get(Slot::Projection), false);
         if (get(Slot::Conflict))
           unique_columns(get(Slot::Conflict), false);
+        if (get(Slot::ConflictSets))
+          unique_columns(get(Slot::ConflictSets), true);
       } else {
         if (q.default_values || get(Slot::Projection) || get(Slot::Values) ||
-            get(Slot::Conflict) ||
+            get(Slot::Conflict) || get(Slot::ConflictSets) ||
             (q.kind == StatementKind::Delete && get(Slot::Returning)) ||
             (q.kind == StatementKind::Update ? !get(Slot::Sets)
                                              : bool(get(Slot::Sets))))
@@ -1018,24 +1091,38 @@ class Compiler {
         out(" (");
         expressions(q.get(Slot::Projection), &scope, &ctes, depth + 1,
                     Use::Column);
-        out(") VALUES (");
-        Id column_list = q.get(Slot::Projection);
-        for (Id l = q.get(Slot::Values); l; l = node(l).b) {
-          if (l != q.get(Slot::Values))
-            out(", ");
-          auto value = expression(node(l).a, nullptr, &ctes, depth + 2);
-          if (preparing_)
-            assignment(column(node(column_list).a, &scope, true), value,
-                       node(l).a);
-          column_list = node(column_list).b;
+        out(") VALUES ");
+        if (node(q.get(Slot::Values)).kind == Kind::ValuesGroups) {
+          group_values(q.get(Slot::Values), q.get(Slot::Projection), &scope,
+                       depth + 1);
+        } else {
+          out('(');
+          Id column_list = q.get(Slot::Projection);
+          for (Id l = q.get(Slot::Values); l; l = node(l).b) {
+            if (l != q.get(Slot::Values))
+              out(", ");
+            auto value = expression(node(l).a, nullptr, &ctes, depth + 2);
+            if (preparing_)
+              assignment(column(node(column_list).a, &scope, true), value,
+                         node(l).a);
+            column_list = node(column_list).b;
+          }
+          out(')');
         }
-        out(')');
       }
       if (q.get(Slot::Conflict)) {
         out(" ON CONFLICT (");
         expressions(q.get(Slot::Conflict), &scope, &ctes, depth + 1,
                     Use::Column);
-        out(") DO NOTHING");
+        if (q.get(Slot::ConflictSets)) {
+          out(") DO UPDATE SET ");
+          Scope conflict_scope = scope;
+          conflict_scope.conflict_update = true;
+          expressions(q.get(Slot::ConflictSets), &conflict_scope, &ctes,
+                      depth + 1, Use::Assignment);
+        } else {
+          out(") DO NOTHING");
+        }
       }
     } else if (q.kind == StatementKind::Update) {
       out("UPDATE ");

@@ -145,8 +145,16 @@ public:
   constexpr auto group_by(std::span<const Expr> values) const -> Query;
   constexpr auto order_by(std::span<const Expr> values) const -> Query;
   constexpr auto values(std::span<const Expr> values) const -> Query;
+  // Zip nonempty, equally sized parameter groups into ordered VALUES rows.
+  // This form requires try_compile_expanded; each column keeps contiguous
+  // slots.
+  constexpr auto values_groups(std::span<const ParameterGroup> columns) const
+      -> Query;
   constexpr auto set(std::span<const Expr> values) const -> Query;
   constexpr auto on_conflict_do_nothing(std::span<const Expr> columns) const
+      -> Query;
+  constexpr auto on_conflict_do_update(std::span<const Expr> columns,
+                                       std::span<const Expr> assignments) const
       -> Query;
   constexpr auto returning(std::span<const Expr> columns) const -> Query;
   template <class... T>
@@ -180,6 +188,12 @@ public:
     return values(list);
   }
   template <class... T>
+    requires((std::is_same_v<T, ParameterGroup>) && ...)
+  constexpr auto values_groups(T... items) const -> Query {
+    const std::array<ParameterGroup, sizeof...(T)> list{items...};
+    return values_groups(std::span<const ParameterGroup>(list));
+  }
+  template <class... T>
     requires((std::is_same_v<T, Expr>) && ...)
   constexpr auto set(T... items) const -> Query {
     const std::array<Expr, sizeof...(T)> list{items...};
@@ -193,12 +207,14 @@ using Id = unsigned;
 enum class Kind {
   Invalid,
   Column,
+  Excluded,
   Star,
   Table,
   Cte,
   Derived,
   Parameter,
   ParameterGroup,
+  ValuesGroups,
   Integer,
   Text,
   Null,
@@ -249,6 +265,7 @@ enum class Slot {
   Values,
   Sets,
   Conflict,
+  ConflictSets,
   Returning,
   Count
 };
@@ -508,6 +525,13 @@ class QueryBuilder {
           add(Node{.kind = Kind::Link, .a = check(values[i - 1]), .b = result});
     return result;
   }
+  constexpr auto list(std::span<const ParameterGroup> values) -> Id {
+    Id result = 0;
+    for (auto i = values.size(); i > 0; --i)
+      result =
+          add(Node{.kind = Kind::Link, .a = check(values[i - 1]), .b = result});
+    return result;
+  }
   constexpr auto append(Id list_id, Id value, unsigned depth = 0) -> Id {
     if (depth >= limits_.depth) {
       fail(ErrorKind::Depth);
@@ -678,6 +702,13 @@ public:
   constexpr auto col(std::string_view qualifier, std::string_view name)
       -> Expr {
     return named(Kind::Column, name, qualifier);
+  }
+  // Only the current INSERT's conflict-update RHS may use this expression.
+  constexpr auto excluded(Expr column) -> Expr {
+    auto id = check(column);
+    if (nodes_[id].kind != Kind::Column)
+      fail(ErrorKind::InvalidShape, id, "excluded column");
+    return Expr(this, add(Node{.kind = Kind::Excluded, .a = id}));
   }
   constexpr auto table(std::string_view name) -> Expr {
     return named(Kind::Table, name);
@@ -1031,6 +1062,16 @@ constexpr auto Query::values(std::span<const Expr> x) const -> Query {
   return owner_ ? owner_->change(*this, Slot::Values, owner_->list(x))
                 : Query{};
 }
+constexpr auto
+Query::values_groups(std::span<const ParameterGroup> columns) const -> Query {
+  if (!owner_)
+    return {};
+  if (columns.empty())
+    owner_->fail(ErrorKind::InvalidShape, id_, "empty VALUES groups");
+  auto groups =
+      owner_->add(Node{.kind = Kind::ValuesGroups, .a = owner_->list(columns)});
+  return owner_->change(*this, Slot::Values, groups);
+}
 constexpr auto Query::set(std::span<const Expr> x) const -> Query {
   if (owner_ && x.empty())
     owner_->fail(ErrorKind::InvalidShape, id_, "empty SET");
@@ -1042,6 +1083,22 @@ Query::on_conflict_do_nothing(std::span<const Expr> columns) const -> Query {
     owner_->fail(ErrorKind::InvalidShape, id_, "empty conflict target");
   return owner_ ? owner_->change(*this, Slot::Conflict, owner_->list(columns))
                 : Query{};
+}
+constexpr auto
+Query::on_conflict_do_update(std::span<const Expr> columns,
+                             std::span<const Expr> assignments) const -> Query {
+  if (!owner_)
+    return {};
+  if (columns.empty())
+    owner_->fail(ErrorKind::InvalidShape, id_, "empty conflict target");
+  if (assignments.empty())
+    owner_->fail(ErrorKind::InvalidShape, id_, "empty conflict SET");
+  auto data = owner_->queries_[owner_->check(*this)];
+  if (data.get(Slot::Conflict) || data.get(Slot::ConflictSets))
+    owner_->fail(ErrorKind::DuplicateClause, id_);
+  data.get(Slot::Conflict) = owner_->list(columns);
+  data.get(Slot::ConflictSets) = owner_->list(assignments);
+  return owner_->add_query(data);
 }
 constexpr auto Query::returning(std::span<const Expr> columns) const -> Query {
   if (owner_ && columns.empty())
