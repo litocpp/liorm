@@ -1,5 +1,6 @@
 module;
 #include <array>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -67,6 +68,15 @@ struct ExpansionLimits {
   unsigned parameters = 1048576;
   unsigned sql = 1048576;
 };
+struct ExpansionPlan {
+  // Physical slots after logical-name deduplication, and SQL bytes excluding
+  // NUL.
+  unsigned parameters{};
+  unsigned sql{};
+};
+// The planned path opts into a wide policy, not a database or memory guarantee.
+inline constexpr ExpansionLimits planned_expansion_ceiling{
+    2147483647U, std::numeric_limits<unsigned>::max()};
 // SQL and parameter metadata are owned; views returned by sql() remain valid
 // only while this object is alive and has not been moved or assigned.
 class ExpandedQuery {
@@ -160,7 +170,8 @@ class Compiler {
   CompiledQuery result_{};
   Error error_{};
   bool preparing_{true};
-  unsigned fact_cursor_{};
+  bool expanded_mode_{}, measuring_{};
+  unsigned fact_cursor_{}, measured_sql_{};
   ExpandedQuery *expanded_{};
   ExpansionLimits expansion_limits_{};
   std::array<bool, 64> groups_{};
@@ -197,6 +208,14 @@ class Compiler {
   constexpr void out(char c) {
     if (preparing_ || error_.kind != ErrorKind::None)
       return;
+    if (measuring_) {
+      if (measured_sql_ >= expansion_limits_.sql) {
+        fail(ErrorKind::Capacity, 0, "sql");
+        return;
+      }
+      ++measured_sql_;
+      return;
+    }
     if (expanded_) {
       if (expanded_->sql_.size() >= expansion_limits_.sql) {
         fail(ErrorKind::Capacity, 0, "sql");
@@ -213,6 +232,14 @@ class Compiler {
         rstd::byte{static_cast<unsigned char>(c)};
   }
   constexpr void out(std::string_view value) {
+    if (measuring_ && !preparing_ && error_.kind == ErrorKind::None) {
+      if (value.size() > expansion_limits_.sql - measured_sql_) {
+        fail(ErrorKind::Capacity, 0, "sql");
+        return;
+      }
+      measured_sql_ += unsigned(value.size());
+      return;
+    }
     for (char c : value)
       out(c);
   }
@@ -232,6 +259,20 @@ class Compiler {
       out(digits[--count]);
   }
   constexpr void quote(Text value, char delimiter = '"') {
+    if (measuring_ && error_.kind == ErrorKind::None) {
+      // Every non-ASCII SQL byte comes from quoted builder text. Validate it
+      // before allocating the planned output, using the same UTF-8 checker.
+      auto raw = text(value);
+      std::array<rstd::byte, 8192> bytes{};
+      for (unsigned i = 0; i < raw.size(); ++i)
+        bytes[i] = rstd::byte{static_cast<unsigned char>(raw[i])};
+      if (rstd::str_::from_utf8(rstd::slice<rstd::u8>::from_raw_parts(
+                                    bytes.data(), rstd::usize(raw.size())))
+              .is_err()) {
+        fail(ErrorKind::InvalidName);
+        return;
+      }
+    }
     out(delimiter);
     for (char c : text(value)) {
       out(c);
@@ -422,7 +463,7 @@ class Compiler {
   constexpr void parameter(Id id, bool group = false) {
     auto n = node(id);
     if (preparing_) {
-      if (group && !expanded_) {
+      if (group && !expanded_mode_) {
         fail(ErrorKind::InvalidShape, id,
              "parameter group requires runtime expansion");
         return;
@@ -449,7 +490,7 @@ class Compiler {
           fail(ErrorKind::Capacity, id, "parameters");
           return;
         }
-        if (expanded_ &&
+        if (expanded_mode_ &&
             (next_slot_ > expansion_limits_.parameters + 1ULL ||
              amount > expansion_limits_.parameters + 1ULL - next_slot_ ||
              amount > 2147483648ULL - next_slot_)) {
@@ -1192,11 +1233,28 @@ class Compiler {
     }
   }
 
+  void prepare_and_measure(Id id) {
+    query(id, nullptr, nullptr, 0);
+    if (error_.kind != ErrorKind::None)
+      return;
+    preparing_ = false;
+    measuring_ = true;
+    fact_cursor_ = 0;
+    measured_sql_ = 0;
+    query(id, nullptr, nullptr, 0);
+    measuring_ = false;
+    if (error_.kind == ErrorKind::None && fact_cursor_ != prepared_.count)
+      fail(ErrorKind::InvalidShape, id, "expression uses");
+  }
+
 public:
   constexpr explicit Compiler(const QueryBuilder &b) : builder_(b) {}
+  explicit Compiler(const QueryBuilder &b, ExpansionLimits limits)
+      : builder_(b), expanded_mode_(true), expansion_limits_(limits) {}
   explicit Compiler(const QueryBuilder &b, ExpandedQuery &out,
                     ExpansionLimits limits)
-      : builder_(b), expanded_(&out), expansion_limits_(limits) {}
+      : builder_(b), expanded_mode_(true), expanded_(&out),
+        expansion_limits_(limits) {}
   static auto run_expanded(Query value, ExpansionLimits limits)
       -> rstd::Result<ExpandedQuery, Error> {
     if (!value.owner_ || !value.id_)
@@ -1212,6 +1270,52 @@ public:
     c.query(value.id_, nullptr, nullptr, 0);
     if (c.error_.kind != ErrorKind::None)
       return rstd::Err(Error(c.error_));
+    auto valid = rstd::str_::from_utf8(result.sql().as_bytes());
+    if (valid.is_err())
+      return rstd::Err(Error{.kind = ErrorKind::InvalidName});
+    result.metadata_ = c.result_;
+    result.groups_ = c.groups_;
+    result.counts_ = c.group_counts_;
+    return rstd::Ok(rstd::move(result));
+  }
+
+  static auto plan_expansion(Query value, ExpansionLimits ceiling)
+      -> rstd::Result<ExpansionPlan, Error> {
+    if (!value.owner_ || !value.id_)
+      return rstd::Err(Error{.kind = ErrorKind::InvalidHandle});
+    Compiler c(*value.owner_, ceiling);
+    if (value.owner_->error_.kind != ErrorKind::None)
+      return rstd::Err(Error(value.owner_->error_));
+    c.prepare_and_measure(value.id_);
+    if (c.error_.kind != ErrorKind::None)
+      return rstd::Err(Error(c.error_));
+    return rstd::Ok(ExpansionPlan{c.next_slot_ - 1, c.measured_sql_});
+  }
+
+  static auto run_expanded_planned(Query value, ExpansionLimits ceiling)
+      -> rstd::Result<ExpandedQuery, Error> {
+    if (!value.owner_ || !value.id_)
+      return rstd::Err(Error{.kind = ErrorKind::InvalidHandle});
+    Compiler c(*value.owner_, ceiling);
+    if (value.owner_->error_.kind != ErrorKind::None)
+      return rstd::Err(Error(value.owner_->error_));
+    c.prepare_and_measure(value.id_);
+    if (c.error_.kind != ErrorKind::None)
+      return rstd::Err(Error(c.error_));
+    ExpansionPlan plan{c.next_slot_ - 1, c.measured_sql_};
+    ExpandedQuery result;
+    result.sql_.reserve(plan.sql);
+    c.expanded_ = &result;
+    c.expansion_limits_ = {plan.parameters, plan.sql};
+    c.fact_cursor_ = 0;
+    c.query(value.id_, nullptr, nullptr, 0);
+    if (c.error_.kind != ErrorKind::None)
+      return rstd::Err(Error(c.error_));
+    if (result.sql_.size() != plan.sql || c.next_slot_ - 1 != plan.parameters ||
+        c.fact_cursor_ != c.prepared_.count) {
+      c.fail(ErrorKind::InvalidShape, value.id_, "expansion plan");
+      return rstd::Err(Error(c.error_));
+    }
     auto valid = rstd::str_::from_utf8(result.sql().as_bytes());
     if (valid.is_err())
       return rstd::Err(Error{.kind = ErrorKind::InvalidName});
@@ -1264,6 +1368,32 @@ auto try_compile_expanded(Build build, ExpansionLimits expansion = {},
     -> rstd::Result<ExpandedQuery, Error> {
   QueryBuilder builder(limits);
   return try_compile_expanded(build(builder), expansion);
+}
+inline auto
+try_plan_expansion(Query query,
+                   ExpansionLimits ceiling = planned_expansion_ceiling)
+    -> rstd::Result<ExpansionPlan, Error> {
+  return Compiler::plan_expansion(query, ceiling);
+}
+template <class Build>
+auto try_plan_expansion(Build build,
+                        ExpansionLimits ceiling = planned_expansion_ceiling,
+                        Limits limits = {})
+    -> rstd::Result<ExpansionPlan, Error> {
+  QueryBuilder builder(limits);
+  return try_plan_expansion(build(builder), ceiling);
+}
+inline auto try_compile_expanded_planned(
+    Query query, ExpansionLimits ceiling = planned_expansion_ceiling)
+    -> rstd::Result<ExpandedQuery, Error> {
+  return Compiler::run_expanded_planned(query, ceiling);
+}
+template <class Build>
+auto try_compile_expanded_planned(
+    Build build, ExpansionLimits ceiling = planned_expansion_ceiling,
+    Limits limits = {}) -> rstd::Result<ExpandedQuery, Error> {
+  QueryBuilder builder(limits);
+  return try_compile_expanded_planned(build(builder), ceiling);
 }
 template <class Build>
 constexpr auto try_compile(Build build, Limits limits = {})

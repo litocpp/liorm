@@ -760,21 +760,38 @@ public:
   template <class T>
   constexpr auto param_group(std::string_view name, rstd::usize count)
       -> ParameterGroup {
-    if constexpr (requires { ParameterTraits<T>::type; }) {
-      auto size = count.to_primitive();
-      if (size > 2147483647ULL) {
-        fail(ErrorKind::Capacity, 0, "parameters");
-        return {};
-      }
-      return ParameterGroup(this,
-                            add(Node{.kind = Kind::ParameterGroup,
-                                     .name = store(name),
-                                     .integer = static_cast<long long>(size),
-                                     .type = ParameterTraits<T>::type}));
-    } else {
+    if constexpr (requires { ParameterTraits<T>::type; })
+      return param_group(name, count, ParameterTraits<T>::type);
+    else {
       fail(ErrorKind::UnsupportedType, 0, name);
       return {};
     }
+  }
+  constexpr auto param_group(std::string_view name, rstd::usize count,
+                             ParameterType type) -> ParameterGroup {
+    if (!valid_type(type)) {
+      fail(ErrorKind::UnsupportedType, 0, name);
+      return {};
+    }
+    auto size = count.to_primitive();
+    if (size > 2147483647ULL) {
+      fail(ErrorKind::Capacity, 0, "parameters");
+      return {};
+    }
+    return ParameterGroup(this,
+                          add(Node{.kind = Kind::ParameterGroup,
+                                   .name = store(name),
+                                   .integer = static_cast<long long>(size),
+                                   .type = type}));
+  }
+  template <auto Member>
+    requires requires { schema::column_name<Member>(); }
+  constexpr auto member_param_group(std::string_view name, rstd::usize count,
+                                    ParameterType type) -> ParameterGroup {
+    auto result = param_group(name, count, type);
+    if (result.owner_ == this && result.id_)
+      nodes_[result.id_].member_identity = &member_parameter_identity<Member>;
+    return result;
   }
   constexpr auto integer(long long value) -> Expr {
     return Expr(this, add(Node{.kind = Kind::Integer, .integer = value}));

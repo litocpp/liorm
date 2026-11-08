@@ -2,6 +2,8 @@ module;
 #include <cstdint>
 #include <rstd/enum.hpp>
 #include <rstd/macro.hpp>
+#include <span>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 export module liorm.sqlito;
@@ -212,6 +214,47 @@ public:
     return liorm::bind_model(query_, writer, model);
   }
   template <class T>
+  auto bind(std::string_view name, const T &value)
+      -> Result<empty, liorm::BindError<::sqlito::Error>> {
+    Writer writer(statement_);
+    return liorm::bind_parameter(query_, writer, name, value);
+  }
+  template <class T>
+  auto bind_group(std::string_view name, slice<T> values)
+      -> Result<empty, liorm::BindError<::sqlito::Error>> {
+    return bind_group_with(name, values.len(),
+                           [values](std::size_t index) -> decltype(auto) {
+                             return values[usize(index)];
+                           });
+  }
+  template <class T, std::size_t Extent>
+  auto bind_group(std::string_view name, std::span<T, Extent> values)
+      -> Result<empty, liorm::BindError<::sqlito::Error>> {
+    return bind_group_with(name, usize(values.size()),
+                           [values](std::size_t index) -> decltype(auto) {
+                             return values[index];
+                           });
+  }
+  template <class Getter>
+  auto bind_group_with(std::string_view name, usize count, Getter getter)
+      -> Result<empty, liorm::BindError<::sqlito::Error>> {
+    Writer writer(statement_);
+    return liorm::bind_group_values(query_, writer, name, count.to_primitive(),
+                                    std::move(getter));
+  }
+  template <class T>
+  auto bind_repeat(std::string_view name, const T &value)
+      -> Result<empty, liorm::BindError<::sqlito::Error>> {
+    Writer writer(statement_);
+    return liorm::bind_repeated(query_, writer, name, value);
+  }
+  template <class Shape, class GetRow>
+  auto bind_rows(const Shape &shape, usize count, GetRow get_row)
+      -> Result<empty, liorm::BindError<::sqlito::Error>> {
+    Writer writer(statement_);
+    return shape.bind(query_, writer, count, std::move(get_row));
+  }
+  template <class T>
   auto bind(usize slot, const T &value) -> Result<empty, ::sqlito::Error>
     requires(Writer::template supports<T>())
   {
@@ -245,6 +288,59 @@ auto prepare(Session &session, Query query)
             std::is_same_v<Session, ::sqlito::Transaction>))
 {
   return PreparedQuery<Query>::create(session, std::move(query));
+}
+
+// Terminals consume through Done before reporting success. They never finish
+// the caller's transaction. A failure leaves recovery/reset to the caller.
+template <class Prepared>
+auto discard(Prepared &statement) -> Result<empty, ::sqlito::Error> {
+  while (rstd_try(statement.step()) == ::sqlito::Step::Row) {
+  }
+  return Ok(empty{});
+}
+
+// Scalar queries require exactly one row. Decode errors retain their original
+// kind; zero or multiple rows are a Range error. Extra rows are fully drained.
+template <class T, class Prepared>
+  requires requires(::sqlito::Statement &statement, usize column) {
+    Codec<T>::read(statement, column);
+  }
+auto scalar(Prepared &statement, usize column = usize())
+    -> Result<T, ::sqlito::Error> {
+  if (rstd_try(statement.step()) == ::sqlito::Step::Done)
+    return Err(::sqlito::Error{::sqlito::ErrorKind::Range, 0,
+                               String::make("expected exactly one row"_str)});
+  auto reader = statement.reader();
+  auto result = rstd_try(reader.template read<T>(column));
+  bool extra = false;
+  while (rstd_try(statement.step()) == ::sqlito::Step::Row)
+    extra = true;
+  if (extra)
+    return Err(::sqlito::Error{::sqlito::ErrorKind::Range, 0,
+                               String::make("expected exactly one row"_str)});
+  return Ok(rstd::move(result));
+}
+
+// Return the first model, or None, while still consuming subsequent rows and
+// propagating later step errors. Projection offsets and factories stay
+// explicit.
+template <class Prepared, class Model, std::size_t Offset,
+          class Factory = liorm::DefaultModelFactory<Model>>
+  requires requires(
+      query::ProjectionGroup<query::ModelGroup<Model>, Offset> group,
+      Reader &reader, Factory factory) {
+    liorm::decode_model(group, reader, std::move(factory));
+  }
+auto one_model(Prepared &statement,
+               query::ProjectionGroup<query::ModelGroup<Model>, Offset> group,
+               Factory factory = {}) -> Result<Option<Model>, ::sqlito::Error> {
+  if (rstd_try(statement.step()) == ::sqlito::Step::Done)
+    return Ok<Option<Model>>(None());
+  auto reader = statement.reader();
+  auto result =
+      rstd_try(liorm::decode_model(group, reader, std::move(factory)));
+  rstd_try(discard(statement));
+  return Ok(Some(rstd::move(result)));
 }
 
 class ActiveWriteError {

@@ -8,3 +8,4 @@ export import :row;
 export import :sqlite;
 export import :bind;
 export import :write;
+export import :rows;
