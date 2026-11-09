@@ -32,7 +32,8 @@ auto codec_null(const T& value) -> Option<bool>
 }
 
 auto invalid_column() -> ::sqlito::Error {
-    return { ::sqlito::ErrorKind::Type, 0, String::make("invalid model column"_str) };
+    return ::sqlito::Error::from(
+        ::sqlito::ErrorKind::Type, 0, String::make("invalid model column"_str));
 }
 
 template<>
@@ -375,15 +376,15 @@ template<class T, class Prepared>
     }
 auto scalar(Prepared& statement, usize column = usize()) -> Result<T, ::sqlito::Error> {
     if (rstd_try(statement.step()) == ::sqlito::Step::Done)
-        return Err(::sqlito::Error {
-            ::sqlito::ErrorKind::Range, 0, String::make("expected exactly one row"_str) });
+        return Err(::sqlito::Error::from(
+            ::sqlito::ErrorKind::Range, 0, String::make("expected exactly one row"_str)));
     auto reader = statement.reader();
     auto result = rstd_try(reader.template read<T>(column));
     bool extra  = false;
     while (rstd_try(statement.step()) == ::sqlito::Step::Row) extra = true;
     if (extra)
-        return Err(::sqlito::Error {
-            ::sqlito::ErrorKind::Range, 0, String::make("expected exactly one row"_str) });
+        return Err(::sqlito::Error::from(
+            ::sqlito::ErrorKind::Range, 0, String::make("expected exactly one row"_str)));
     return Ok(rstd::move(result));
 }
 
