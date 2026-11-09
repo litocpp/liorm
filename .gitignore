@@ -3,3 +3,5 @@
 /sqlito/.lito/
 /build/
 /tools/
+/sqlito/build/
+/tests/macro/build/
