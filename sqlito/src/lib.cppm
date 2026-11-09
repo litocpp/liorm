@@ -132,11 +132,12 @@ public:
 };
 
 template <class Query> class PreparedQuery;
-template <class Model> class PreparedWrite;
+class Writer;
+template <class Model, class Policy = Writer> class PreparedWrite;
 
 class Writer {
   template <class Query> friend class PreparedQuery;
-  template <class Model> friend class PreparedWrite;
+  template <class Model, class Policy> friend class PreparedWrite;
   ::sqlito::Statement &statement_;
   explicit Writer(::sqlito::Statement &statement) : statement_(statement) {}
 
@@ -178,6 +179,14 @@ public:
     return Codec<T>::write(statement_, slot, value);
   }
 };
+
+// The adapter adds only error/lifetime construction requirements to the core
+// writer protocol. Field support and parameter metadata remain Policy-owned.
+template <class Policy>
+concept WritePolicy =
+    requires { typename Policy::error_type; } &&
+    std::is_same_v<typename Policy::error_type, ::sqlito::Error> &&
+    std::is_constructible_v<Policy, Writer &>;
 
 template <class Query> class PreparedQuery {
   Query query_;
@@ -349,10 +358,10 @@ class ActiveWriteError {
             (NotUpdated), (NotInserted))
 };
 
-template <class Model> class PreparedWrite {
-  liorm::WriteCommand<Writer, Model> command_;
+template <class Model, class Policy> class PreparedWrite {
+  liorm::WriteCommand<Policy, Model> command_;
   ::sqlito::Statement statement_;
-  PreparedWrite(liorm::WriteCommand<Writer, Model> command,
+  PreparedWrite(liorm::WriteCommand<Policy, Model> command,
                 ::sqlito::Statement statement)
       : command_(std::move(command)), statement_(rstd::move(statement)) {}
 
@@ -364,10 +373,11 @@ public:
 
   template <class Session>
   static auto create(Session &session,
-                     liorm::WriteCommand<Writer, Model> command)
+                     liorm::WriteCommand<Policy, Model> command)
       -> Result<PreparedWrite, ::sqlito::Error>
-    requires(std::is_same_v<Session, ::sqlito::Connection> ||
-             std::is_same_v<Session, ::sqlito::Transaction>)
+    requires(WritePolicy<Policy> &&
+             (std::is_same_v<Session, ::sqlito::Connection> ||
+              std::is_same_v<Session, ::sqlito::Transaction>))
   {
     auto statement = session.prepare(command.query().sql());
     if (statement.is_err())
@@ -382,8 +392,11 @@ public:
   }
   auto query() const && -> const query::CompiledQuery & = delete;
   auto projection() const { return command_.projection(); }
-  auto bind() -> Result<empty, liorm::BindError<::sqlito::Error>> {
-    Writer writer(statement_);
+  auto bind() -> Result<empty, liorm::BindError<::sqlito::Error>>
+    requires WritePolicy<Policy>
+  {
+    Writer base(statement_);
+    Policy writer(base);
     return command_.bind(writer);
   }
   auto step() -> Result<::sqlito::Step, ::sqlito::Error> {
@@ -394,22 +407,28 @@ public:
   auto reader() && -> Reader = delete;
 };
 
-template <class Session, class Model>
-auto prepare(Session &session, liorm::WriteCommand<Writer, Model> command)
-    -> Result<PreparedWrite<Model>, ::sqlito::Error>
-  requires(std::is_same_v<Session, ::sqlito::Connection> ||
-           std::is_same_v<Session, ::sqlito::Transaction>)
+template <class Session, class Model, class Policy = Writer>
+auto prepare(Session &session, liorm::WriteCommand<Policy, Model> command)
+    -> Result<PreparedWrite<Model, Policy>, ::sqlito::Error>
+  requires(WritePolicy<Policy> &&
+           (std::is_same_v<Session, ::sqlito::Connection> ||
+            std::is_same_v<Session, ::sqlito::Transaction>))
 {
-  return PreparedWrite<Model>::create(session, std::move(command));
+  return PreparedWrite<Model, Policy>::create(session, std::move(command));
 }
 
+// Policy follows Factory to preserve execute<Session, Model, Factory> callers.
 template <class Session, class Model,
-          class Factory = liorm::DefaultModelFactory<Model>>
-  requires requires(query::ProjectionGroup<query::ModelGroup<Model>, 0> group,
+          class Factory = liorm::DefaultModelFactory<Model>,
+          class Policy = Writer>
+  requires(WritePolicy<Policy> &&
+           (std::is_same_v<Session, ::sqlito::Connection> ||
+            std::is_same_v<Session, ::sqlito::Transaction>) &&
+           requires(query::ProjectionGroup<query::ModelGroup<Model>, 0> group,
                     Reader &reader, Factory factory) {
-    liorm::decode_model(group, reader, std::move(factory));
-  }
-auto execute(Session &session, liorm::WriteCommand<Writer, Model> command,
+             liorm::decode_model(group, reader, std::move(factory));
+           })
+auto execute(Session &session, liorm::WriteCommand<Policy, Model> command,
              Factory factory = {}) -> Result<Model, ActiveWriteError> {
   auto prepared = prepare(session, std::move(command));
   if (prepared.is_err())
