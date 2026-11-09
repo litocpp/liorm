@@ -140,6 +140,27 @@ struct Codec<T> {
     }
 };
 
+template<class V>
+class ExpectedReader {
+    ::sqlito::Statement& statement_;
+    usize                offset_;
+    Option<V>            expected_;
+
+public:
+    using error_type = ::sqlito::Error;
+    ExpectedReader(::sqlito::Statement& statement, usize offset, Option<V> expected)
+        : statement_(statement), offset_(offset), expected_(rstd::move(expected)) {}
+
+    template<class T>
+    auto read(usize column) -> Result<T, error_type> {
+        auto value = rstd_try(Codec<T>::read(statement_, offset_ + column));
+        if constexpr (rstd::mtp::same_as<T, V>) {
+            if (expected_.is_some() && value != *expected_) return Err(invalid_column());
+        }
+        return Ok(rstd::move(value));
+    }
+};
+
 class Reader {
     ::sqlito::Statement& statement_;
 
