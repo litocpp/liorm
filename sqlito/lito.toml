@@ -19,4 +19,4 @@ rstd-test = { version = "0.1.9" }
 
 [[test]]
 name = "liorm-sqlito-tests"
-sources = ["tests/main.cpp", "tests/enum_derive.cpp", "tests/row.cpp", "tests/write.cpp", "tests/module.cppm", "tests/module_consumer.cpp", "tests/active.cpp", "tests/parameters.cpp", "tests/terminals.cpp", "tests/rows.cpp", "tests/policy.cpp"]
+sources = ["tests/main.cpp", "tests/enum_derive.cpp", "tests/primitive_codec.cpp", "tests/row.cpp", "tests/write.cpp", "tests/module.cppm", "tests/module_consumer.cpp", "tests/active.cpp", "tests/parameters.cpp", "tests/terminals.cpp", "tests/rows.cpp", "tests/policy.cpp"]

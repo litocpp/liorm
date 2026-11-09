@@ -70,6 +70,38 @@ struct Codec<i32> {
 };
 
 template<>
+struct Codec<bool> {
+    static constexpr auto parameter_type() -> query::ParameterType {
+        return { ValueKind::Boolean, false };
+    }
+    static auto read(::sqlito::Statement& statement, usize column)
+        -> Result<bool, ::sqlito::Error> {
+        auto value = rstd_try(Codec<i64>::read(statement, column));
+        return Ok(value != i64());
+    }
+    static auto write(::sqlito::Statement& statement, usize slot, bool value)
+        -> Result<empty, ::sqlito::Error> {
+        return Codec<i64>::write(statement, slot, i64(value ? 1 : 0));
+    }
+};
+
+template<>
+struct Codec<f64> {
+    static constexpr auto parameter_type() -> query::ParameterType {
+        return { ValueKind::Real, false };
+    }
+    static auto read(::sqlito::Statement& statement, usize column) -> Result<f64, ::sqlito::Error> {
+        auto value = rstd_try(statement.real(column));
+        if (value.is_none()) return Err(invalid_column());
+        return Ok(f64(*value));
+    }
+    static auto write(::sqlito::Statement& statement, usize slot, f64 value)
+        -> Result<empty, ::sqlito::Error> {
+        return statement.bind(slot, value.to_primitive());
+    }
+};
+
+template<>
 struct Codec<String> {
     static constexpr auto parameter_type() -> query::ParameterType {
         return { ValueKind::Text, false };
