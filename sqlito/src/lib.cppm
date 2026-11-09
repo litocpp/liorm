@@ -116,6 +116,30 @@ struct Codec<Option<T>> {
     }
 };
 
+template<class T>
+concept sqlite_enum = requires(T* value) { liorm_sqlite_enum_values(value); };
+
+template<class T>
+    requires sqlite_enum<T>
+struct Codec<T> {
+    static constexpr auto parameter_type() -> query::ParameterType {
+        return Codec<i64>::parameter_type();
+    }
+    static auto read(::sqlito::Statement& statement, usize column) -> Result<T, ::sqlito::Error> {
+        auto value = rstd_try(Codec<i64>::read(statement, column));
+        for (auto candidate : liorm_sqlite_enum_values(static_cast<T*>(nullptr)))
+            if (i64(static_cast<long long>(candidate)) == value) return Ok(candidate);
+        return Err(invalid_column());
+    }
+    static auto write(::sqlito::Statement& statement, usize slot, T value)
+        -> Result<empty, ::sqlito::Error> {
+        for (auto candidate : liorm_sqlite_enum_values(static_cast<T*>(nullptr)))
+            if (candidate == value)
+                return Codec<i64>::write(statement, slot, i64(static_cast<long long>(value)));
+        return Err(invalid_column());
+    }
+};
+
 class Reader {
     ::sqlito::Statement& statement_;
 

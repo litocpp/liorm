@@ -194,3 +194,38 @@ auto table(pmacro::DeriveInput input, pmacro::Context& context) noexcept -> Outp
               ">{ }; }}";
     return context.parse(source);
 }
+
+[[pmacro::define("liorm")]]
+auto sqlite_enum(pmacro::DeriveInput input, pmacro::Context& context) noexcept -> Output {
+    auto snapshot = context.declaration();
+    if (! snapshot)
+        return fail(context, {}, input.item_span, "liorm sqlite_enum requires a complete declaration");
+    const auto& declaration = **snapshot;
+    if (! declaration.name)
+        return fail(
+            context, declaration.source, input.item_span, "liorm sqlite_enum requires a named type");
+    if (declaration.scope != pmacro::DeclarationScope::Namespace)
+        return fail(context,
+                    declaration.source,
+                    input.item_span,
+                    "liorm sqlite_enum requires a namespace-scope declaration");
+    const auto* info = std::get_if<pmacro::EnumInfo>(&declaration.data);
+    if (! info)
+        return fail(
+            context, declaration.source, input.item_span, "liorm sqlite_enum requires an enum");
+    if (info->enumerators.empty())
+        return fail(context,
+                    declaration.source,
+                    input.item_span,
+                    "liorm sqlite_enum requires at least one enumerator");
+    const auto& qualified = declaration.qualified_name.value_or(*declaration.name);
+    auto        count     = std::to_string(info->enumerators.size());
+    auto        source    = std::string();
+    if (declaration.after_item_export == pmacro::AfterItemExport::Required) source += "export ";
+    source += "constexpr auto liorm_sqlite_enum_values(" + qualified + "*)->::rstd::array<" +
+              qualified + "," + count + ">{return {";
+    for (const auto& enumerator : info->enumerators)
+        source += qualified + "::" + enumerator.name + ",";
+    source += "};}";
+    return context.parse(source);
+}
