@@ -1,11 +1,19 @@
 module;
-#include <array>
-#include <initializer_list>
-#include <optional>
-#include <span>
-#include <string_view>
 export module liorm:schema;
 export import :value;
+import rstd;
+using namespace rstd::prelude;
+using namespace rstd::literals;
+
+namespace liorm::schema {
+constexpr auto schema_text(rstd::byte const *data, usize length) -> ref<str> {
+  return ref<str>::from_raw_parts_unchecked(data, length);
+}
+template <class T>
+constexpr auto span_of(initializer_list<T> values) -> slice<T> {
+  return slice<T>::from_raw_parts(values.begin(), usize(values.size()));
+}
+} // namespace liorm::schema
 
 export namespace liorm::schema {
 enum class ErrorKind {
@@ -27,120 +35,121 @@ enum class ErrorKind {
 };
 struct Error {
   ErrorKind kind{};
-  std::array<char, 96> context{};
-  unsigned length{};
+  array<rstd::byte, 96> context{};
+  usize length{};
   bool truncated{};
-  constexpr auto name() const -> std::string_view {
-    return {context.data(), length};
+  constexpr auto name() const -> ref<str> {
+    return schema_text(context.data(), length);
   }
 };
 struct SchemaLimits {
-  unsigned tables = 64, columns = 512, keys = 128, relations = 128;
-  unsigned members = 1024, text = 8192;
+  usize tables {64}, columns {512}, keys {128}, relations {128};
+  usize members {1024}, text {8192};
 };
 constexpr auto valid_limits(SchemaLimits l) -> bool {
-  return l.tables <= 64 && l.columns <= 512 && l.keys <= 128 &&
-         l.relations <= 128 && l.members <= 1024 && l.text <= 8192;
+  return l.tables <= 64_usize && l.columns <= 512_usize && l.keys <= 128_usize &&
+         l.relations <= 128_usize && l.members <= 1024_usize &&
+         l.text <= 8192_usize;
 }
 struct TableInfo {
-  std::string_view name;
+  ref<str> name;
 };
 struct ColumnInfo {
-  std::string_view name;
-  unsigned table{};
+  ref<str> name;
+  usize table{};
   ValueType type{};
 };
 struct KeyInfo {
-  std::string_view name;
-  unsigned table{};
-  std::span<const unsigned> columns;
+  ref<str> name;
+  usize table{};
+  slice<usize> columns;
   bool primary{};
 };
 struct ForeignKeyInfo {
-  std::string_view name;
-  unsigned table{}, target{};
-  std::span<const unsigned> columns;
+  ref<str> name;
+  usize table{}, target{};
+  slice<usize> columns;
 };
 class SchemaBuilder;
 class Registry;
 } // namespace liorm::schema
 namespace liorm::schema {
 struct Text {
-  unsigned offset{}, length{};
+  usize offset{}, length{};
 };
 struct TableData {
   Text name;
 };
 struct ColumnData {
   Text name;
-  unsigned table{};
+  usize table{};
   ValueType type{};
 };
 struct KeyData {
   Text name;
-  unsigned table{}, offset{}, count{};
+  usize table{}, offset{}, count{};
   bool primary{};
 };
 struct ForeignKeyData {
   Text name;
-  unsigned table{}, target{}, offset{}, count{};
+  usize table{}, target{}, offset{}, count{};
 };
 } // namespace liorm::schema
 export namespace liorm::schema {
 class Schema {
   friend class SchemaBuilder;
   friend class Registry;
-  std::array<TableData, 64> tables_{};
-  std::array<ColumnData, 512> columns_{};
-  std::array<KeyData, 128> keys_{};
-  std::array<ForeignKeyData, 128> relations_{};
-  std::array<unsigned, 1024> members_{};
-  std::array<char, 8192> text_{};
-  unsigned tables_size_{}, columns_size_{}, keys_size_{}, relations_size_{},
+  array<TableData, 64> tables_{};
+  array<ColumnData, 512> columns_{};
+  array<KeyData, 128> keys_{};
+  array<ForeignKeyData, 128> relations_{};
+  array<usize, 1024> members_{};
+  array<rstd::byte, 8192> text_{};
+  usize tables_size_{}, columns_size_{}, keys_size_{}, relations_size_{},
       members_size_{}, text_size_{};
-  constexpr auto text(Text t) const -> std::string_view {
-    return {text_.data() + t.offset, t.length};
+  constexpr auto text(Text t) const -> ref<str> {
+    return schema_text(text_.data() + t.offset.to_primitive(), t.length);
   }
 
 public:
-  constexpr auto table_count() const -> unsigned { return tables_size_; }
-  constexpr auto column_count() const -> unsigned { return columns_size_; }
-  constexpr auto key_count() const -> unsigned { return keys_size_; }
-  constexpr auto foreign_key_count() const -> unsigned {
+  constexpr auto table_count() const -> usize { return tables_size_; }
+  constexpr auto column_count() const -> usize { return columns_size_; }
+  constexpr auto key_count() const -> usize { return keys_size_; }
+  constexpr auto foreign_key_count() const -> usize {
     return relations_size_;
   }
-  constexpr auto table(unsigned i) const -> TableInfo {
+  constexpr auto table(usize i) const -> TableInfo {
     return {text(tables_.at(i).name)};
   }
-  constexpr auto column(unsigned i) const -> ColumnInfo {
+  constexpr auto column(usize i) const -> ColumnInfo {
     const auto &c = columns_.at(i);
     return {text(c.name), c.table, c.type};
   }
-  constexpr auto key(unsigned i) const -> KeyInfo {
+  constexpr auto key(usize i) const -> KeyInfo {
     const auto &k = keys_.at(i);
     return {text(k.name),
             k.table,
-            {members_.data() + k.offset, k.count},
+            slice<usize>::from_raw_parts(members_.data() + k.offset.to_primitive(), k.count),
             k.primary};
   }
-  constexpr auto foreign_key(unsigned i) const -> ForeignKeyInfo {
+  constexpr auto foreign_key(usize i) const -> ForeignKeyInfo {
     const auto &f = relations_.at(i);
     return {
-        text(f.name), f.table, f.target, {members_.data() + f.offset, f.count}};
+        text(f.name), f.table, f.target, slice<usize>::from_raw_parts(members_.data() + f.offset.to_primitive(), f.count)};
   }
-  constexpr auto find_table(std::string_view name) const
-      -> std::optional<unsigned> {
-    for (unsigned i = 0; i < tables_size_; ++i)
+  constexpr auto find_table(ref<str> name) const
+      -> Option<usize> {
+    for (usize i {}; i < tables_size_; ++i)
       if (same_name(table(i).name, name))
-        return i;
-    return {};
+        return Some(i);
+    return None();
   }
-  constexpr auto find_column(unsigned table, std::string_view name) const
-      -> std::optional<unsigned> {
-    for (unsigned i = 0; i < columns_size_; ++i) {
+  constexpr auto find_column(usize table, ref<str> name) const
+      -> Option<usize> {
+    for (usize i {}; i < columns_size_; ++i) {
       auto c = column(i);
       if (c.table == table && same_name(c.name, name))
-        return i;
+        return Some(i);
     }
     return {};
   }
@@ -148,8 +157,8 @@ public:
 class Column {
   friend class SchemaBuilder;
   SchemaBuilder *owner_{};
-  unsigned id_{};
-  constexpr Column(SchemaBuilder *b, unsigned id) : owner_(b), id_(id) {}
+  usize id_{};
+  constexpr Column(SchemaBuilder *b, usize id) : owner_(b), id_(id) {}
 
 public:
   constexpr Column() = default;
@@ -157,8 +166,8 @@ public:
 class Key {
   friend class SchemaBuilder;
   SchemaBuilder *owner_{};
-  unsigned id_{};
-  constexpr Key(SchemaBuilder *b, unsigned id) : owner_(b), id_(id) {}
+  usize id_{};
+  constexpr Key(SchemaBuilder *b, usize id) : owner_(b), id_(id) {}
 
 public:
   constexpr Key() = default;
@@ -166,27 +175,27 @@ public:
 class Table {
   friend class SchemaBuilder;
   SchemaBuilder *owner_{};
-  unsigned id_{};
-  constexpr Table(SchemaBuilder *b, unsigned id) : owner_(b), id_(id) {}
+  usize id_{};
+  constexpr Table(SchemaBuilder *b, usize id) : owner_(b), id_(id) {}
 
 public:
   constexpr Table() = default;
-  constexpr auto column(std::string_view name, ValueType type) const -> Column;
+  constexpr auto column(ref<str> name, ValueType type) const -> Column;
   template <class T>
-  constexpr auto column(std::string_view name) const -> Column;
-  constexpr auto primary_key(std::string_view name,
-                             std::span<const Column> columns) const -> Key;
-  constexpr auto unique_key(std::string_view name,
-                            std::span<const Column> columns) const -> Key;
-  constexpr auto primary_key(std::string_view name,
-                             std::initializer_list<Column> columns) const
+  constexpr auto column(ref<str> name) const -> Column;
+  constexpr auto primary_key(ref<str> name,
+                             slice<Column> columns) const -> Key;
+  constexpr auto unique_key(ref<str> name,
+                            slice<Column> columns) const -> Key;
+  constexpr auto primary_key(ref<str> name,
+                             initializer_list<Column> columns) const
       -> Key {
-    return primary_key(name, std::span(columns.begin(), columns.size()));
+    return primary_key(name, span_of(columns));
   }
-  constexpr auto unique_key(std::string_view name,
-                            std::initializer_list<Column> columns) const
+  constexpr auto unique_key(ref<str> name,
+                            initializer_list<Column> columns) const
       -> Key {
-    return unique_key(name, std::span(columns.begin(), columns.size()));
+    return unique_key(name, span_of(columns));
   }
 };
 class SchemaBuilder {
@@ -194,41 +203,41 @@ class SchemaBuilder {
   Schema data_{};
   SchemaLimits limits_{};
   Error error_{};
-  constexpr void fail(ErrorKind kind, std::string_view name = {}) {
+  constexpr void fail(ErrorKind kind, ref<str> name = {}) {
     if (error_.kind != ErrorKind::None)
       return;
     error_.kind = kind;
-    error_.length = unsigned(name.size() < 96 ? name.size() : 96);
-    error_.truncated = name.size() > 96;
-    for (unsigned i = 0; i < error_.length; ++i)
-      error_.context[i] = name[i];
+    error_.length = name.len() < 96_usize ? name.len() : 96_usize;
+    error_.truncated = name.len() > 96_usize;
+    for (usize i {}; i < error_.length; ++i)
+      error_.context[i] = rstd::byte {name[i].to_primitive()};
   }
-  constexpr auto store(std::string_view name) -> Text {
+  constexpr auto store(ref<str> name) -> Text {
     if (!valid_name(name)) {
       fail(ErrorKind::InvalidName, name);
       return {};
     }
-    if (name.size() > limits_.text - data_.text_size_) {
+    if (name.len() > limits_.text - data_.text_size_) {
       fail(ErrorKind::Capacity, name);
       return {};
     }
-    std::array<rstd::byte, 8192> bytes{};
-    for (unsigned i = 0; i < name.size(); ++i)
-      bytes[i] = rstd::byte{static_cast<unsigned char>(name[i])};
+    array<rstd::byte, 8192> bytes{};
+    for (usize i {}; i < name.len(); ++i)
+      bytes[i] = rstd::byte {static_cast<unsigned char>(name[i].to_primitive())};
     if (rstd::str_::from_utf8(rstd::slice<rstd::u8>::from_raw_parts(
-                                  bytes.data(), rstd::usize(name.size())))
+                                  bytes.data(), rstd::usize(name.len())))
             .is_err()) {
       fail(ErrorKind::InvalidName, name);
       return {};
     }
-    Text t{data_.text_size_, unsigned(name.size())};
-    for (char c : name)
-      data_.text_[data_.text_size_++] = c;
+    Text t{data_.text_size_, usize(name.len())};
+    for (usize i {}; i < name.len(); ++i)
+      data_.text_[data_.text_size_++] = rstd::byte {name[i].to_primitive()};
     return t;
   }
   template <class T>
-  constexpr auto check(T h, unsigned count, std::string_view name) -> bool {
-    if (!h.owner_ || !h.id_) {
+  constexpr auto check(T h, usize count, ref<str> name) -> bool {
+    if (! h.owner_ || h.id_ == 0_usize) {
       fail(ErrorKind::InvalidHandle, name);
       return false;
     }
@@ -242,7 +251,7 @@ class SchemaBuilder {
     }
     return true;
   }
-  constexpr auto add_column(Table t, std::string_view name, ValueType type)
+  constexpr auto add_column(Table t, ref<str> name, ValueType type)
       -> Column {
     if (!check(t, data_.tables_size_, name))
       return {};
@@ -250,7 +259,7 @@ class SchemaBuilder {
       fail(ErrorKind::UnsupportedType, name);
       return {};
     }
-    if (data_.find_column(t.id_ - 1, name)) {
+    if (data_.find_column(t.id_ - 1_usize, name)) {
       fail(ErrorKind::DuplicateName, name);
       return {};
     }
@@ -259,28 +268,28 @@ class SchemaBuilder {
       return {};
     }
     auto text = store(name);
-    unsigned id = data_.columns_size_++;
-    data_.columns_[id] = {text, t.id_ - 1, type};
-    return Column(this, id + 1);
+    usize id = data_.columns_size_++;
+    data_.columns_[id] = {text, t.id_ - 1_usize, type};
+    return Column(this, id + 1_usize);
   }
-  constexpr auto members(std::span<const Column> columns, unsigned table,
-                         std::string_view name) -> bool {
-    if (columns.empty()) {
+  constexpr auto members(slice<Column> columns, usize table,
+                         ref<str> name) -> bool {
+    if (columns.is_empty()) {
       fail(ErrorKind::EmptyKey, name);
       return false;
     }
-    if (columns.size() > limits_.members - data_.members_size_) {
+    if (columns.len() > limits_.members - data_.members_size_) {
       fail(ErrorKind::Capacity, name);
       return false;
     }
-    for (unsigned i = 0; i < columns.size(); ++i) {
+    for (usize i {}; i < columns.len(); ++i) {
       if (!check(columns[i], data_.columns_size_, name))
         return false;
-      if (data_.column(columns[i].id_ - 1).table != table) {
+      if (data_.column(columns[i].id_ - 1_usize).table != table) {
         fail(ErrorKind::CrossTable, name);
         return false;
       }
-      for (unsigned j = 0; j < i; ++j)
+      for (usize j {}; j < i; ++j)
         if (columns[j].id_ == columns[i].id_) {
           fail(ErrorKind::DuplicateColumn, name);
           return false;
@@ -288,14 +297,14 @@ class SchemaBuilder {
     }
     return true;
   }
-  constexpr auto add_key(Table t, std::string_view name,
-                         std::span<const Column> columns, bool primary) -> Key {
+  constexpr auto add_key(Table t, ref<str> name,
+                         slice<Column> columns, bool primary) -> Key {
     if (!check(t, data_.tables_size_, name) ||
-        !members(columns, t.id_ - 1, name))
+        !members(columns, t.id_ - 1_usize, name))
       return {};
-    for (unsigned i = 0; i < data_.keys_size_; ++i) {
+    for (usize i {}; i < data_.keys_size_; ++i) {
       auto k = data_.key(i);
-      if (k.table != t.id_ - 1)
+      if (k.table != t.id_ - 1_usize)
         continue;
       if (same_name(k.name, name)) {
         fail(ErrorKind::DuplicateName, name);
@@ -308,7 +317,7 @@ class SchemaBuilder {
     }
     if (primary)
       for (auto c : columns)
-        if (data_.column(c.id_ - 1).type.nullable) {
+        if (data_.column(c.id_ - 1_usize).type.nullable) {
           fail(ErrorKind::NullablePrimaryKey, name);
           return {};
         }
@@ -317,25 +326,25 @@ class SchemaBuilder {
       return {};
     }
     auto text = store(name);
-    unsigned id = data_.keys_size_++;
-    data_.keys_[id] = {text, t.id_ - 1, data_.members_size_,
-                       unsigned(columns.size()), primary};
+    usize id = data_.keys_size_++;
+    data_.keys_[id] = {text, t.id_ - 1_usize, data_.members_size_,
+                       usize(columns.len()), primary};
     for (auto c : columns)
-      data_.members_[data_.members_size_++] = c.id_ - 1;
-    return Key(this, id + 1);
+      data_.members_[data_.members_size_++] = c.id_ - 1_usize;
+    return Key(this, id + 1_usize);
   }
 
 public:
   constexpr explicit SchemaBuilder(SchemaLimits limits = {}) : limits_(limits) {
     if (!valid_limits(limits)) {
-      fail(ErrorKind::Capacity, "limits");
+      fail(ErrorKind::Capacity, "limits"_str);
       limits_ = {};
     }
   }
   SchemaBuilder(const SchemaBuilder &) = delete;
   SchemaBuilder(SchemaBuilder &&) = delete;
-  constexpr auto table(std::string_view name) -> Table {
-    if (name.find('.') != std::string_view::npos) {
+  constexpr auto table(ref<str> name) -> Table {
+    if (name.contains("."_str)) {
       fail(ErrorKind::InvalidName, name);
       return {};
     }
@@ -348,35 +357,35 @@ public:
       return {};
     }
     auto text = store(name);
-    unsigned id = data_.tables_size_++;
+    usize id = data_.tables_size_++;
     data_.tables_[id] = {text};
-    return Table(this, id + 1);
+    return Table(this, id + 1_usize);
   }
-  constexpr void foreign_key(std::string_view name,
-                             std::span<const Column> columns, Key target) {
+  constexpr void foreign_key(ref<str> name,
+                             slice<Column> columns, Key target) {
     if (!check(target, data_.keys_size_, name))
       return;
-    if (columns.empty()) {
+    if (columns.is_empty()) {
       fail(ErrorKind::EmptyKey, name);
       return;
     }
-    if (!check(columns[0], data_.columns_size_, name))
+    if (!check(columns[0_usize], data_.columns_size_, name))
       return;
-    unsigned table = data_.column(columns[0].id_ - 1).table;
+    usize table = data_.column(columns[0_usize].id_ - 1_usize).table;
     if (!members(columns, table, name))
       return;
-    for (unsigned i = 0; i < data_.relations_size_; ++i)
+    for (usize i {}; i < data_.relations_size_; ++i)
       if (same_name(data_.foreign_key(i).name, name)) {
         fail(ErrorKind::DuplicateName, name);
         return;
       }
-    auto key = data_.key(target.id_ - 1);
-    if (columns.size() != key.columns.size()) {
+    auto key = data_.key(target.id_ - 1_usize);
+    if (columns.len() != key.columns.len()) {
       fail(ErrorKind::ColumnCount, name);
       return;
     }
-    for (unsigned i = 0; i < columns.size(); ++i) {
-      auto a = data_.column(columns[i].id_ - 1).type,
+    for (usize i {}; i < columns.len(); ++i) {
+      auto a = data_.column(columns[i].id_ - 1_usize).type,
            b = data_.column(key.columns[i]).type;
       if (b.nullable) {
         fail(ErrorKind::InvalidTarget, name);
@@ -392,16 +401,16 @@ public:
       return;
     }
     auto text = store(name);
-    data_.relations_[data_.relations_size_++] = {text, table, target.id_ - 1,
+    data_.relations_[data_.relations_size_++] = {text, table, target.id_ - 1_usize,
                                                  data_.members_size_,
-                                                 unsigned(columns.size())};
+                                                 usize(columns.len())};
     for (auto c : columns)
-      data_.members_[data_.members_size_++] = c.id_ - 1;
+      data_.members_[data_.members_size_++] = c.id_ - 1_usize;
   }
-  constexpr void foreign_key(std::string_view name,
-                             std::initializer_list<Column> columns,
+  constexpr void foreign_key(ref<str> name,
+                             initializer_list<Column> columns,
                              Key target) {
-    foreign_key(name, std::span(columns.begin(), columns.size()), target);
+    foreign_key(name, span_of(columns), target);
   }
   constexpr auto finish() const -> rstd::Result<Schema, Error> {
     if (error_.kind != ErrorKind::None)
@@ -409,12 +418,12 @@ public:
     return rstd::Ok(Schema(data_));
   }
 };
-constexpr auto Table::column(std::string_view name, ValueType type) const
+constexpr auto Table::column(ref<str> name, ValueType type) const
     -> Column {
   return owner_ ? owner_->add_column(*this, name, type) : Column{};
 }
 template <class T>
-constexpr auto Table::column(std::string_view name) const -> Column {
+constexpr auto Table::column(ref<str> name) const -> Column {
   if constexpr (requires { ValueTraits<T>::type; })
     return column(name, ValueTraits<T>::type);
   else {
@@ -423,13 +432,13 @@ constexpr auto Table::column(std::string_view name) const -> Column {
     return {};
   }
 }
-constexpr auto Table::primary_key(std::string_view name,
-                                  std::span<const Column> columns) const
+constexpr auto Table::primary_key(ref<str> name,
+                                  slice<Column> columns) const
     -> Key {
   return owner_ ? owner_->add_key(*this, name, columns, true) : Key{};
 }
-constexpr auto Table::unique_key(std::string_view name,
-                                 std::span<const Column> columns) const -> Key {
+constexpr auto Table::unique_key(ref<str> name,
+                                 slice<Column> columns) const -> Key {
   return owner_ ? owner_->add_key(*this, name, columns, false) : Key{};
 }
 inline void invalid_schema(Error) { __builtin_trap(); }
@@ -451,8 +460,8 @@ consteval auto define(Build build, SchemaLimits limits = {}) -> Schema {
 
 namespace liorm::schema {
 struct Range {
-  unsigned tables{}, columns{}, keys{}, relations{}, members{}, text{};
-  unsigned table_count{}, column_count{}, key_count{}, relation_count{},
+  usize tables{}, columns{}, keys{}, relations{}, members{}, text{};
+  usize table_count{}, column_count{}, key_count{}, relation_count{},
       member_count{}, text_count{};
 };
 } // namespace liorm::schema
@@ -461,11 +470,11 @@ export namespace liorm::schema {
 class Registry {
   Schema data_{};
   SchemaLimits limits_{};
-  std::array<Range, 16> ranges_{};
-  unsigned count_{}, capacity_{16};
+  array<Range, 16> ranges_{};
+  usize count_{}, capacity_ {16};
   constexpr auto append(const Schema &source, Range r)
-      -> rstd::Result<unsigned, Error> {
-    if (!valid_limits(limits_) || capacity_ > 16 || count_ >= capacity_ ||
+      -> rstd::Result<usize, Error> {
+    if (!valid_limits(limits_) || capacity_ > 16_usize || count_ >= capacity_ ||
         r.table_count > limits_.tables - data_.tables_size_ ||
         r.column_count > limits_.columns - data_.columns_size_ ||
         r.key_count > limits_.keys - data_.keys_size_ ||
@@ -480,25 +489,25 @@ class Registry {
     auto remap_text = [&](Text t) {
       return Text{dest.text + (t.offset - r.text), t.length};
     };
-    for (unsigned i = 0; i < r.table_count; ++i) {
+    for (usize i {}; i < r.table_count; ++i) {
       auto v = source.tables_[r.tables + i];
       v.name = remap_text(v.name);
       data_.tables_[data_.tables_size_++] = v;
     }
-    for (unsigned i = 0; i < r.column_count; ++i) {
+    for (usize i {}; i < r.column_count; ++i) {
       auto v = source.columns_[r.columns + i];
       v.name = remap_text(v.name);
       v.table = dest.tables + (v.table - r.tables);
       data_.columns_[data_.columns_size_++] = v;
     }
-    for (unsigned i = 0; i < r.key_count; ++i) {
+    for (usize i {}; i < r.key_count; ++i) {
       auto v = source.keys_[r.keys + i];
       v.name = remap_text(v.name);
       v.table = dest.tables + (v.table - r.tables);
       v.offset = dest.members + (v.offset - r.members);
       data_.keys_[data_.keys_size_++] = v;
     }
-    for (unsigned i = 0; i < r.relation_count; ++i) {
+    for (usize i {}; i < r.relation_count; ++i) {
       auto v = source.relations_[r.relations + i];
       v.name = remap_text(v.name);
       v.table = dest.tables + (v.table - r.tables);
@@ -506,19 +515,19 @@ class Registry {
       v.offset = dest.members + (v.offset - r.members);
       data_.relations_[data_.relations_size_++] = v;
     }
-    for (unsigned i = 0; i < r.member_count; ++i)
+    for (usize i {}; i < r.member_count; ++i)
       data_.members_[data_.members_size_++] =
           dest.columns + (source.members_[r.members + i] - r.columns);
-    for (unsigned i = 0; i < r.text_count; ++i)
+    for (usize i {}; i < r.text_count; ++i)
       data_.text_[data_.text_size_++] = source.text_[r.text + i];
     ranges_[count_] = dest;
-    return rstd::Ok(unsigned(count_++));
+    return rstd::Ok(usize(count_++));
   }
 
 public:
-  constexpr explicit Registry(SchemaLimits limits = {}, unsigned capacity = 16)
+  constexpr explicit Registry(SchemaLimits limits = {}, usize capacity = 16_usize)
       : limits_(limits), capacity_(capacity) {}
-  constexpr auto use(const Schema &schema) -> rstd::Result<unsigned, Error> {
+  constexpr auto use(const Schema &schema) -> rstd::Result<usize, Error> {
     return append(schema, Range{.table_count = schema.tables_size_,
                                 .column_count = schema.columns_size_,
                                 .key_count = schema.keys_size_,
@@ -526,45 +535,45 @@ public:
                                 .member_count = schema.members_size_,
                                 .text_count = schema.text_size_});
   }
-  constexpr auto import(const Registry &source, unsigned registration)
-      -> rstd::Result<unsigned, Error> {
+  constexpr auto import(const Registry &source, usize registration)
+      -> rstd::Result<usize, Error> {
     return append(source.data_, source.ranges_.at(registration));
   }
-  constexpr auto remap_table(const Registry &source, unsigned old,
-                             unsigned from, unsigned to) const -> unsigned {
+  constexpr auto remap_table(const Registry &source, usize old,
+                             usize from, usize to) const -> usize {
     return ranges_.at(to).tables + (old - source.ranges_.at(from).tables);
   }
-  constexpr auto remap_column(const Registry &source, unsigned old,
-                              unsigned from, unsigned to) const -> unsigned {
+  constexpr auto remap_column(const Registry &source, usize old,
+                              usize from, usize to) const -> usize {
     return ranges_.at(to).columns + (old - source.ranges_.at(from).columns);
   }
-  constexpr auto find_table(unsigned registration, std::string_view name) const
-      -> std::optional<unsigned> {
+  constexpr auto find_table(usize registration, ref<str> name) const
+      -> Option<usize> {
     auto r = ranges_.at(registration);
-    for (unsigned i = 0; i < r.table_count; ++i)
+    for (usize i {}; i < r.table_count; ++i)
       if (same_name(data_.table(r.tables + i).name, name))
-        return r.tables + i;
-    return {};
+        return Some(r.tables + i);
+    return None();
   }
-  constexpr auto find_foreign_key(unsigned registration,
-                                  std::string_view name) const
-      -> std::optional<unsigned> {
+  constexpr auto find_foreign_key(usize registration,
+                                  ref<str> name) const
+      -> Option<usize> {
     auto r = ranges_.at(registration);
-    for (unsigned i = 0; i < r.relation_count; ++i)
+    for (usize i {}; i < r.relation_count; ++i)
       if (same_name(data_.foreign_key(r.relations + i).name, name))
-        return r.relations + i;
-    return {};
+        return Some(r.relations + i);
+    return None();
   }
-  constexpr auto table(unsigned i) const -> TableInfo { return data_.table(i); }
-  constexpr auto column(unsigned i) const -> ColumnInfo {
+  constexpr auto table(usize i) const -> TableInfo { return data_.table(i); }
+  constexpr auto column(usize i) const -> ColumnInfo {
     return data_.column(i);
   }
-  constexpr auto key(unsigned i) const -> KeyInfo { return data_.key(i); }
-  constexpr auto foreign_key(unsigned i) const -> ForeignKeyInfo {
+  constexpr auto key(usize i) const -> KeyInfo { return data_.key(i); }
+  constexpr auto foreign_key(usize i) const -> ForeignKeyInfo {
     return data_.foreign_key(i);
   }
-  constexpr auto find_column(unsigned table, std::string_view name) const
-      -> std::optional<unsigned> {
+  constexpr auto find_column(usize table, ref<str> name) const
+      -> Option<usize> {
     return data_.find_column(table, name);
   }
 };

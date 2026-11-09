@@ -1,5 +1,4 @@
 module;
-#include <string_view>
 export module liorm:value;
 export import rstd.core;
 
@@ -48,21 +47,23 @@ constexpr auto assignable(ValueKind target, ValueKind value) -> bool {
   return target == value ||
          (target == ValueKind::Real && value == ValueKind::Integer);
 }
-constexpr auto valid_name(std::string_view value) -> bool {
-  if (value.empty())
+constexpr auto valid_name(rstd::ref<rstd::str> value) -> bool {
+  if (value.is_empty())
     return false;
-  for (char c : value)
-    if (!c)
+  for (rstd::usize i {}; i < value.len(); ++i)
+    if (!value[i].to_primitive())
       return false;
   return true;
 }
-constexpr auto same_name(std::string_view a, std::string_view b) -> bool {
-  if (a.size() != b.size())
+constexpr auto same_name(rstd::ref<rstd::str> a, rstd::ref<rstd::str> b) -> bool {
+  if (a.len() != b.len())
     return false;
-  auto fold = [](char c) {
-    return c >= 'A' && c <= 'Z' ? char(c + ('a' - 'A')) : c;
+  auto fold = [](rstd::u8 c) {
+    return c >= rstd::u8('A') && c <= rstd::u8('Z')
+               ? rstd::u8(c.to_primitive() + ('a' - 'A'))
+               : c;
   };
-  for (unsigned i = 0; i < a.size(); ++i)
+  for (rstd::usize i {}; i < a.len(); ++i)
     if (fold(a[i]) != fold(b[i]))
       return false;
   return true;

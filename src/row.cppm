@@ -1,9 +1,9 @@
 module;
-#include <cstddef>
-#include <type_traits>
-#include <utility>
 export module liorm:row;
+import rstd;
 export import :query;
+using namespace rstd::prelude;
+using namespace rstd::literals;
 
 export namespace liorm {
 // Factories receive owning fields in projection order, with their member
@@ -15,14 +15,13 @@ template <auto Member, class T> struct DecodedField {
 
 template <class Model> struct DefaultModelFactory {
   template <class... Fields>
-    requires(
-        std::is_default_constructible_v<Model> &&
-        (std::is_assignable_v<decltype(std::declval<Model &>().*Fields::member),
-                              decltype(std::declval<Fields &&>().value)> &&
-         ...))
+    requires(requires(Model model, Fields &&...fields) {
+      Model {};
+      ((model.*Fields::member = rstd::move(fields).value), ...);
+    })
   constexpr auto operator()(Fields &&...fields) const -> Model {
     Model result{};
-    ((result.*Fields::member = std::move(fields.value)), ...);
+    ((result.*Fields::member = rstd::move(fields.value)), ...);
     return result;
   }
 };
@@ -33,24 +32,30 @@ template <class Field>
 auto decoded_field_type()
     -> DecodedField<Field::member, typename Field::value_type>;
 
-template <class Model, class Factory, std::size_t... Index>
-consteval auto model_factory_valid(std::index_sequence<Index...>) -> bool {
+template <class R, class F, class... Args>
+concept invocable_r =
+    rstd::mtp::is_invocable_v<F, Args...> &&
+    rstd::mtp::convertible_to<
+        decltype(rstd::mtp::declval<F>()(rstd::mtp::declval<Args>()...)), R>;
+
+template <class Model, class Factory, rstd::size_t... Index>
+consteval auto model_factory_valid(rstd::mtp::index_sequence<Index...>) -> bool {
   using Definition =
       decltype(liorm_table_definition(static_cast<Model *>(nullptr)));
-  return std::is_invocable_r_v<
+  return invocable_r<
       Model, Factory &,
       decltype(decoded_field_type<typename Definition::template field<Index>>())
           &&...>;
 }
 
-template <std::size_t Index, class Group, class Reader, class Factory,
+template <rstd::size_t Index, class Group, class Reader, class Factory,
           class... Values>
 auto decode_model_fields(Reader &reader, Factory &factory, Values &&...values)
     -> rstd::Result<typename Group::segment_type::model_type,
                     typename Reader::error_type> {
   using Model = typename Group::segment_type::model_type;
   if constexpr (Index == Group::count) {
-    return rstd::Ok<Model>(factory(std::forward<Values>(values)...));
+    return rstd::Ok<Model>(factory(rstd::forward<Values>(values)...));
   } else {
     using Field =
         typename Group::segment_type::definition::template field<Index>;
@@ -61,16 +66,16 @@ auto decode_model_fields(Reader &reader, Factory &factory, Values &&...values)
     DecodedField<Field::member, typename Field::value_type> field{
         rstd::move(value).unwrap()};
     return decode_model_fields<Index + 1, Group>(
-        reader, factory, std::forward<Values>(values)..., std::move(field));
+        reader, factory, rstd::forward<Values>(values)..., rstd::move(field));
   }
 }
 } // namespace liorm
 
 export namespace liorm {
-template <class Model, std::size_t Offset, class Reader,
+template <class Model, rstd::size_t Offset, class Reader,
           class Factory = DefaultModelFactory<Model>>
   requires(model_factory_valid<Model, Factory>(
-      std::make_index_sequence<query::ModelGroup<Model>::count>{}))
+      rstd::mtp::make_index_sequence<query::ModelGroup<Model>::count>{}))
 auto decode_model(query::ProjectionGroup<query::ModelGroup<Model>, Offset>,
                   Reader &reader, Factory factory = {})
     -> rstd::Result<Model, typename Reader::error_type> {

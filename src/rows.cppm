@@ -1,20 +1,17 @@
 module;
-#include <array>
-#include <cstddef>
-#include <span>
-#include <string_view>
-#include <tuple>
-#include <type_traits>
-#include <utility>
 export module liorm:rows;
+import rstd;
 export import :bind;
+export import :query;
+using namespace rstd::prelude;
+using namespace rstd::literals;
 
 namespace liorm {
 template <auto... Members> consteval auto distinct_row_members() -> bool {
-  std::array<const void *, sizeof...(Members)> ids{
+  array<const void *, sizeof...(Members)> ids{
       &query::member_parameter_identity<Members>...};
-  for (std::size_t i = 0; i < ids.size(); ++i)
-    for (std::size_t j = i + 1; j < ids.size(); ++j)
+  for (usize i {}; i < ids.len(); ++i)
+    for (usize j = i + usize(1); j < ids.len(); ++j)
       if (ids[i] == ids[j])
         return false;
   return true;
@@ -22,16 +19,18 @@ template <auto... Members> consteval auto distinct_row_members() -> bool {
 template <class Model, auto Member> consteval auto row_parameter_name() {
   constexpr auto table = schema::table_name<Model>();
   constexpr auto column = schema::column_name<Member>();
-  constexpr std::string_view prefix = "_rows_";
-  std::array<char, prefix.size() + table.size() + 1 + column.size()> result{};
-  std::size_t i = 0;
-  for (char c : prefix)
-    result[i++] = c;
-  for (char c : table)
-    result[i++] = c;
-  result[i++] = '_';
-  for (char c : column)
-    result[i++] = c;
+  constexpr ref<str> prefix = "_rows_"_str;
+  array<rstd::byte, prefix.len().to_primitive() + table.len().to_primitive() + 1 +
+                        column.len().to_primitive()>
+         result{};
+  usize i {};
+  for (usize k {}; k < prefix.len(); ++k)
+    result[i++] = rstd::byte {prefix[k].to_primitive()};
+  for (usize k {}; k < table.len(); ++k)
+    result[i++] = rstd::byte {table[k].to_primitive()};
+  result[i++] = rstd::byte {static_cast<unsigned char>('_')};
+  for (usize k {}; k < column.len(); ++k)
+    result[i++] = rstd::byte {column[k].to_primitive()};
   return result;
 }
 template <class Model, auto Member>
@@ -52,7 +51,7 @@ template <class Model> struct InsertRowsTarget {
 // defaults remain the owner. A row accessor supplies precisely these values.
 template <class Policy, class Model, auto... Members>
   requires(sizeof...(Members) > 0) &&
-          ((std::is_same_v<
+          ((rstd::mtp::same_as<
                typename schema::MemberPointer<decltype(Members)>::owner_type,
                Model>) &&
            ...) &&
@@ -63,56 +62,61 @@ template <class Policy, class Model, auto... Members>
 class InsertRowsShape {
   template <auto Member>
   using Value = typename schema::MemberPointer<decltype(Member)>::value_type;
-  using Values = std::tuple<Value<Members>...>;
+  using Values = rstd::tuple<Value<Members>...>;
 
 public:
-  static constexpr std::size_t column_count = sizeof...(Members);
+  static constexpr rstd::size_t column_count = sizeof...(Members);
   template <auto Member>
-  static constexpr auto parameter_name() -> std::string_view {
+  static constexpr auto parameter_name() -> ref<str> {
     const auto &name = row_parameter_storage<Model, Member>;
-    return {name.data(), name.size()};
+    return ref<str>::from_raw_parts_unchecked(
+        static_cast<rstd::byte const *>(name.data()),
+        usize(name.len().to_primitive()));
   }
   constexpr auto insert(query::QueryBuilder &builder,
                         const schema::Schema &schema, rstd::usize count) const
       -> InsertRowsTarget<Model> {
     auto table = builder.use(schema).template table<Model>();
-    const std::array columns{table.template col<Members>()...};
-    const std::array groups{builder.template member_param_group<Members>(
-        parameter_name<Members>(), count,
-        Policy::template parameter_type<Value<Members>>())...};
+    const array<query::Expr, sizeof...(Members)> columns {
+        table.template col<Members>()...};
+    const array<query::ParameterGroup, sizeof...(Members)> groups {
+        builder.template member_param_group<Members>(
+            parameter_name<Members>(), count,
+            Policy::template parameter_type<Value<Members>>())...};
     auto statement =
         builder
-            .insert_into(table.source(), std::span<const query::Expr>(columns))
-            .values_groups(std::span<const query::ParameterGroup>(groups));
+            .insert_into(table.source(), columns.as_slice())
+            .values_groups(groups.as_slice());
     return {table, statement};
   }
 
   template <class Query, class Writer, class GetRow>
-    requires std::is_same_v<std::remove_cvref_t<Writer>, Policy>
+    requires rstd::mtp::same_as<rstd::mtp::rm_cvf<Writer>, Policy>
   auto bind(const Query &query, Writer &writer, rstd::usize count,
             GetRow get_row) const
       -> rstd::Result<rstd::empty, BindError<typename Writer::error_type>> {
     using Error = BindError<typename Writer::error_type>;
-    using Row = std::remove_cvref_t<decltype(get_row(std::size_t{}))>;
-    static_assert(std::tuple_size_v<Row> == column_count,
+    using Row = rstd::mtp::rm_cvf<decltype(get_row(usize{}))>;
+    static_assert(rstd::mtp::tuple_size<Row> == column_count,
                   "row accessor must provide exactly the selected columns");
     static_assert(
-        []<std::size_t... I>(std::index_sequence<I...>) {
+        []<rstd::size_t... I>(rstd::mtp::index_sequence<I...>) {
           return (
-              std::is_same_v<std::remove_cvref_t<std::tuple_element_t<I, Row>>,
-                             std::tuple_element_t<I, Values>> &&
+              rstd::mtp::same_as<rstd::mtp::rm_cvf<rstd::mtp::tuple_element<I, Row>>,
+                             rstd::mtp::tuple_element<I, Values>> &&
               ...);
-        }(std::make_index_sequence<column_count>{}),
+        }(rstd::mtp::make_index_sequence<column_count>{}),
         "row accessor value types must match their selected members");
-    std::array<ValidatedParameterGroup, column_count> groups{};
+    array<ValidatedParameterGroup, column_count> groups{};
     rstd::Option<Error> failure{rstd::None()};
-    std::size_t column = 0;
+    usize column {};
     auto validate = [&]<auto Member>() {
-      auto index = column++;
+      auto index = column;
+      ++column;
       if (failure.is_some())
         return;
       auto result = validate_parameter_group<Value<Member>>(
-          query, writer, parameter_name<Member>(), count.to_primitive());
+          query, writer, parameter_name<Member>(), count);
       if (result.is_err()) {
         failure = rstd::Some(rstd::move(result).unwrap_err());
         return;
@@ -123,29 +127,28 @@ public:
                                    group.parameter_index, rstd::None()});
         return;
       }
-      groups[index] = group;
+      groups[usize(index)] = group;
     };
     (validate.template operator()<Members>(), ...);
     if (failure.is_some())
       return rstd::Err(rstd::move(failure).unwrap());
-    for (std::size_t row_index = 0; row_index < count.to_primitive();
-         ++row_index) {
+    for (usize row_index {}; row_index < count; ++row_index) {
       decltype(auto) row = get_row(row_index);
-      [&]<std::size_t... I>(std::index_sequence<I...>) {
-        auto write = [&]<std::size_t Index>() {
+      [&]<rstd::size_t... I>(rstd::mtp::index_sequence<I...>) {
+        auto write = [&]<rstd::size_t Index>() {
           if (failure.is_some())
             return;
           auto result =
-              writer.template write<std::tuple_element_t<Index, Values>>(
-                  groups[Index].first + rstd::usize(row_index),
-                  std::get<Index>(row));
+              writer.template write<rstd::mtp::tuple_element<Index, Values>>(
+                  groups[usize(Index)].first + row_index,
+                  rstd::get<Index>(row));
           if (result.is_err())
             failure = rstd::Some(
-                Error{BindErrorKind::Write, groups[Index].parameter_index,
+                Error{BindErrorKind::Write, groups[usize(Index)].parameter_index,
                       rstd::Some(rstd::move(result).unwrap_err())});
         };
         (write.template operator()<I>(), ...);
-      }(std::make_index_sequence<column_count>{});
+      }(rstd::mtp::make_index_sequence<column_count>{});
       if (failure.is_some())
         return rstd::Err(rstd::move(failure).unwrap());
     }

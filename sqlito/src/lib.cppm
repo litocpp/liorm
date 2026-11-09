@@ -1,14 +1,12 @@
 module;
-#include <cstdint>
 #include <rstd/enum.hpp>
 #include <rstd/macro.hpp>
-#include <span>
-#include <string_view>
-#include <type_traits>
-#include <utility>
 export module liorm.sqlito;
 export import liorm;
 export import sqlito;
+import rstd;
+using namespace rstd::prelude;
+using namespace rstd::literals;
 
 export namespace liorm::sqlito {
 using namespace rstd::prelude;
@@ -23,10 +21,10 @@ auto codec_null(const T &value) -> Option<bool>
   if (!Codec<T>::parameter_type().nullable)
     return Some(false);
   if constexpr (requires { Codec<T>::is_null(value); }) {
-    using Status = std::remove_cvref_t<decltype(Codec<T>::is_null(value))>;
-    if constexpr (std::is_same_v<Status, bool>)
+    using Status = rstd::mtp::rm_cvf<decltype(Codec<T>::is_null(value))>;
+    if constexpr (rstd::mtp::same_as<Status, bool>)
       return Some(Codec<T>::is_null(value));
-    else if constexpr (std::is_same_v<Status, Option<bool>>)
+    else if constexpr (rstd::mtp::same_as<Status, Option<bool>>)
       return Codec<T>::is_null(value);
   }
   return None();
@@ -61,7 +59,8 @@ template <> struct Codec<i32> {
   static auto read(::sqlito::Statement &statement, usize column)
       -> Result<i32, ::sqlito::Error> {
     auto value = rstd_try(Codec<i64>::read(statement, column));
-    if (value.to_primitive() < INT32_MIN || value.to_primitive() > INT32_MAX)
+    if (value.to_primitive() < rstd::i32::MIN.to_primitive() ||
+        value.to_primitive() > rstd::i32::MAX.to_primitive())
       return Err(invalid_column());
     return Ok(i32(static_cast<int>(value.to_primitive())));
   }
@@ -185,14 +184,14 @@ public:
 template <class Policy>
 concept WritePolicy =
     requires { typename Policy::error_type; } &&
-    std::is_same_v<typename Policy::error_type, ::sqlito::Error> &&
-    std::is_constructible_v<Policy, Writer &>;
+    rstd::mtp::same_as<typename Policy::error_type, ::sqlito::Error> &&
+    rstd::mtp::init<Policy, Writer &>;
 
 template <class Query> class PreparedQuery {
   Query query_;
   ::sqlito::Statement statement_;
   PreparedQuery(Query query, ::sqlito::Statement statement)
-      : query_(std::move(query)), statement_(rstd::move(statement)) {}
+      : query_(rstd::move(query)), statement_(rstd::move(statement)) {}
 
 public:
   PreparedQuery(const PreparedQuery &) = delete;
@@ -203,15 +202,15 @@ public:
   template <class Session>
   static auto create(Session &session, Query query)
       -> Result<PreparedQuery, ::sqlito::Error>
-    requires((std::is_same_v<Query, liorm::query::CompiledQuery> ||
-              std::is_same_v<Query, liorm::query::ExpandedQuery>) &&
-             (std::is_same_v<Session, ::sqlito::Connection> ||
-              std::is_same_v<Session, ::sqlito::Transaction>))
+    requires((rstd::mtp::same_as<Query, liorm::query::CompiledQuery> ||
+              rstd::mtp::same_as<Query, liorm::query::ExpandedQuery>) &&
+             (rstd::mtp::same_as<Session, ::sqlito::Connection> ||
+              rstd::mtp::same_as<Session, ::sqlito::Transaction>))
   {
     auto statement = session.prepare(query.sql());
     if (statement.is_err())
       return Err(rstd::move(statement).unwrap_err());
-    return Ok(PreparedQuery(std::move(query), rstd::move(statement).unwrap()));
+    return Ok(PreparedQuery(rstd::move(query), rstd::move(statement).unwrap()));
   }
 
   auto query() const & -> const Query & { return query_; }
@@ -223,36 +222,27 @@ public:
     return liorm::bind_model(query_, writer, model);
   }
   template <class T>
-  auto bind(std::string_view name, const T &value)
+  auto bind(ref<str> name, const T &value)
       -> Result<empty, liorm::BindError<::sqlito::Error>> {
     Writer writer(statement_);
     return liorm::bind_parameter(query_, writer, name, value);
   }
   template <class T>
-  auto bind_group(std::string_view name, slice<T> values)
+  auto bind_group(ref<str> name, slice<T> values)
       -> Result<empty, liorm::BindError<::sqlito::Error>> {
     return bind_group_with(name, values.len(),
-                           [values](std::size_t index) -> decltype(auto) {
+                           [values](usize index) -> decltype(auto) {
                              return values[usize(index)];
                            });
   }
-  template <class T, std::size_t Extent>
-  auto bind_group(std::string_view name, std::span<T, Extent> values)
-      -> Result<empty, liorm::BindError<::sqlito::Error>> {
-    return bind_group_with(name, usize(values.size()),
-                           [values](std::size_t index) -> decltype(auto) {
-                             return values[index];
-                           });
-  }
   template <class Getter>
-  auto bind_group_with(std::string_view name, usize count, Getter getter)
+  auto bind_group_with(ref<str> name, usize count, Getter getter)
       -> Result<empty, liorm::BindError<::sqlito::Error>> {
     Writer writer(statement_);
-    return liorm::bind_group_values(query_, writer, name, count.to_primitive(),
-                                    std::move(getter));
+    return liorm::bind_group_values(query_, writer, name, count, rstd::move(getter));
   }
   template <class T>
-  auto bind_repeat(std::string_view name, const T &value)
+  auto bind_repeat(ref<str> name, const T &value)
       -> Result<empty, liorm::BindError<::sqlito::Error>> {
     Writer writer(statement_);
     return liorm::bind_repeated(query_, writer, name, value);
@@ -261,7 +251,7 @@ public:
   auto bind_rows(const Shape &shape, usize count, GetRow get_row)
       -> Result<empty, liorm::BindError<::sqlito::Error>> {
     Writer writer(statement_);
-    return shape.bind(query_, writer, count, std::move(get_row));
+    return shape.bind(query_, writer, count, rstd::move(get_row));
   }
   template <class T>
   auto bind(usize slot, const T &value) -> Result<empty, ::sqlito::Error>
@@ -291,12 +281,12 @@ public:
 template <class Session, class Query>
 auto prepare(Session &session, Query query)
     -> Result<PreparedQuery<Query>, ::sqlito::Error>
-  requires((std::is_same_v<Query, liorm::query::CompiledQuery> ||
-            std::is_same_v<Query, liorm::query::ExpandedQuery>) &&
-           (std::is_same_v<Session, ::sqlito::Connection> ||
-            std::is_same_v<Session, ::sqlito::Transaction>))
+  requires((rstd::mtp::same_as<Query, liorm::query::CompiledQuery> ||
+            rstd::mtp::same_as<Query, liorm::query::ExpandedQuery>) &&
+           (rstd::mtp::same_as<Session, ::sqlito::Connection> ||
+            rstd::mtp::same_as<Session, ::sqlito::Transaction>))
 {
-  return PreparedQuery<Query>::create(session, std::move(query));
+  return PreparedQuery<Query>::create(session, rstd::move(query));
 }
 
 // Terminals consume through Done before reporting success. They never finish
@@ -333,12 +323,12 @@ auto scalar(Prepared &statement, usize column = usize())
 // Return the first model, or None, while still consuming subsequent rows and
 // propagating later step errors. Projection offsets and factories stay
 // explicit.
-template <class Prepared, class Model, std::size_t Offset,
+template <class Prepared, class Model, rstd::size_t Offset,
           class Factory = liorm::DefaultModelFactory<Model>>
   requires requires(
       query::ProjectionGroup<query::ModelGroup<Model>, Offset> group,
       Reader &reader, Factory factory) {
-    liorm::decode_model(group, reader, std::move(factory));
+    liorm::decode_model(group, reader, rstd::move(factory));
   }
 auto one_model(Prepared &statement,
                query::ProjectionGroup<query::ModelGroup<Model>, Offset> group,
@@ -347,7 +337,7 @@ auto one_model(Prepared &statement,
     return Ok<Option<Model>>(None());
   auto reader = statement.reader();
   auto result =
-      rstd_try(liorm::decode_model(group, reader, std::move(factory)));
+      rstd_try(liorm::decode_model(group, reader, rstd::move(factory)));
   rstd_try(discard(statement));
   return Ok(Some(rstd::move(result)));
 }
@@ -363,7 +353,7 @@ template <class Model, class Policy> class PreparedWrite {
   ::sqlito::Statement statement_;
   PreparedWrite(liorm::WriteCommand<Policy, Model> command,
                 ::sqlito::Statement statement)
-      : command_(std::move(command)), statement_(rstd::move(statement)) {}
+      : command_(rstd::move(command)), statement_(rstd::move(statement)) {}
 
 public:
   PreparedWrite(const PreparedWrite &) = delete;
@@ -376,14 +366,14 @@ public:
                      liorm::WriteCommand<Policy, Model> command)
       -> Result<PreparedWrite, ::sqlito::Error>
     requires(WritePolicy<Policy> &&
-             (std::is_same_v<Session, ::sqlito::Connection> ||
-              std::is_same_v<Session, ::sqlito::Transaction>))
+             (rstd::mtp::same_as<Session, ::sqlito::Connection> ||
+              rstd::mtp::same_as<Session, ::sqlito::Transaction>))
   {
     auto statement = session.prepare(command.query().sql());
     if (statement.is_err())
       return Err(rstd::move(statement).unwrap_err());
     return Ok(
-        PreparedWrite(std::move(command), rstd::move(statement).unwrap()));
+        PreparedWrite(rstd::move(command), rstd::move(statement).unwrap()));
   }
 
   auto kind() const -> liorm::WriteKind { return command_.kind(); }
@@ -411,10 +401,10 @@ template <class Session, class Model, class Policy = Writer>
 auto prepare(Session &session, liorm::WriteCommand<Policy, Model> command)
     -> Result<PreparedWrite<Model, Policy>, ::sqlito::Error>
   requires(WritePolicy<Policy> &&
-           (std::is_same_v<Session, ::sqlito::Connection> ||
-            std::is_same_v<Session, ::sqlito::Transaction>))
+           (rstd::mtp::same_as<Session, ::sqlito::Connection> ||
+            rstd::mtp::same_as<Session, ::sqlito::Transaction>))
 {
-  return PreparedWrite<Model, Policy>::create(session, std::move(command));
+  return PreparedWrite<Model, Policy>::create(session, rstd::move(command));
 }
 
 // Policy follows Factory to preserve execute<Session, Model, Factory> callers.
@@ -422,15 +412,15 @@ template <class Session, class Model,
           class Factory = liorm::DefaultModelFactory<Model>,
           class Policy = Writer>
   requires(WritePolicy<Policy> &&
-           (std::is_same_v<Session, ::sqlito::Connection> ||
-            std::is_same_v<Session, ::sqlito::Transaction>) &&
+           (rstd::mtp::same_as<Session, ::sqlito::Connection> ||
+            rstd::mtp::same_as<Session, ::sqlito::Transaction>) &&
            requires(query::ProjectionGroup<query::ModelGroup<Model>, 0> group,
                     Reader &reader, Factory factory) {
-             liorm::decode_model(group, reader, std::move(factory));
+             liorm::decode_model(group, reader, rstd::move(factory));
            })
 auto execute(Session &session, liorm::WriteCommand<Policy, Model> command,
              Factory factory = {}) -> Result<Model, ActiveWriteError> {
-  auto prepared = prepare(session, std::move(command));
+  auto prepared = prepare(session, rstd::move(command));
   if (prepared.is_err())
     return Err(ActiveWriteError::Storage(rstd::move(prepared).unwrap_err()));
   auto statement = rstd::move(prepared).unwrap();
@@ -449,7 +439,7 @@ auto execute(Session &session, liorm::WriteCommand<Policy, Model> command,
   }
   auto reader = statement.reader();
   auto decoded =
-      liorm::decode_model(statement.projection(), reader, std::move(factory));
+      liorm::decode_model(statement.projection(), reader, rstd::move(factory));
   if (decoded.is_err())
     return Err(ActiveWriteError::Storage(rstd::move(decoded).unwrap_err()));
   auto result = rstd::move(decoded).unwrap();

@@ -1,26 +1,24 @@
 module;
-#include <array>
-#include <limits>
-#include <optional>
-#include <string_view>
-#include <vector>
 export module liorm:sqlite;
 export import :query;
+import rstd;
+using namespace rstd::prelude;
+using namespace rstd::literals;
 
 export namespace liorm::query {
 struct Parameter {
-  unsigned slot{};
+  usize slot{};
   ParameterType type{};
-  unsigned name_offset{}, name_length{};
+  usize name_offset{}, name_length{};
 };
 class CompiledQuery {
   friend class Compiler;
   friend class ExpandedQuery;
-  std::array<rstd::byte, 16384> sql_{};
-  std::array<char, 8192> names_{};
-  std::array<Parameter, 64> parameters_{};
-  std::array<const void *, 64> member_identities_{};
-  unsigned sql_size_{}, name_size_{}, parameter_count_{};
+  array<rstd::byte, 16384> sql_{};
+  array<rstd::byte, 8192> names_{};
+  array<Parameter, 64> parameters_{};
+  array<const void *, 64> member_identities_{};
+  usize sql_size_{}, name_size_{}, parameter_count_{};
   constexpr CompiledQuery() = default;
 
 public:
@@ -28,32 +26,33 @@ public:
     return rstd::ref<rstd::str>::from_raw_parts_unchecked(
         sql_.data(), rstd::usize(sql_size_));
   }
-  constexpr auto parameter_count() const -> unsigned {
+  constexpr auto parameter_count() const -> usize {
     return parameter_count_;
   }
-  constexpr auto parameter(unsigned index) const -> rstd::Option<Parameter> {
+  constexpr auto parameter(usize index) const -> rstd::Option<Parameter> {
     if (index >= parameter_count_)
       return rstd::None();
     return rstd::Some(Parameter(parameters_[index]));
   }
-  constexpr auto parameter_name(unsigned index) const -> std::string_view {
+  constexpr auto parameter_name(usize index) const -> ref<str> {
     if (index >= parameter_count_)
       return {};
     auto p = parameters_[index];
-    return {names_.data() + p.name_offset, p.name_length};
+    return ref<str>::from_raw_parts_unchecked(
+        names_.data() + p.name_offset.to_primitive(), p.name_length);
   }
-  constexpr auto parameter_has_member(unsigned index) const -> bool {
+  constexpr auto parameter_has_member(usize index) const -> bool {
     return index < parameter_count_ && member_identities_[index] != nullptr;
   }
   template <auto Member>
-  constexpr auto parameter_is(unsigned index) const -> bool {
+  constexpr auto parameter_is(usize index) const -> bool {
     return index < parameter_count_ &&
            member_identities_[index] == &member_parameter_identity<Member>;
   }
-  constexpr auto parameter_is_group(unsigned) const -> bool { return false; }
-  constexpr auto parameter_slot(std::string_view name) const
+  constexpr auto parameter_is_group(usize) const -> bool { return false; }
+  constexpr auto parameter_slot(ref<str> name) const
       -> rstd::Option<rstd::usize> {
-    for (unsigned i = 0; i < parameter_count_; ++i)
+    for (usize i = 0_usize; i < parameter_count_; ++i)
       if (parameter_name(i) == name)
         return rstd::Some(rstd::usize(parameters_[i].slot));
     return rstd::None();
@@ -65,60 +64,60 @@ struct ParameterGroupSlots {
   rstd::usize count{};
 };
 struct ExpansionLimits {
-  unsigned parameters = 1048576;
-  unsigned sql = 1048576;
+  usize parameters = 1048576_usize;
+  usize sql = 1048576_usize;
 };
 struct ExpansionPlan {
   // Physical slots after logical-name deduplication, and SQL bytes excluding
   // NUL.
-  unsigned parameters{};
-  unsigned sql{};
+  usize parameters{};
+  usize sql{};
 };
 // The planned path opts into a wide policy, not a database or memory guarantee.
 inline constexpr ExpansionLimits planned_expansion_ceiling{
-    2147483647U, std::numeric_limits<unsigned>::max()};
+    2147483647_usize, usize(static_cast<rstd::size_t>(-1))};
 // SQL and parameter metadata are owned; views returned by sql() remain valid
 // only while this object is alive and has not been moved or assigned.
 class ExpandedQuery {
   friend class Compiler;
-  std::vector<rstd::byte> sql_;
+  Vec<rstd::byte> sql_;
   CompiledQuery metadata_;
-  std::array<bool, 64> groups_{};
-  std::array<unsigned, 64> counts_{};
+  array<bool, 64> groups_{};
+  array<usize, 64> counts_{};
 
 public:
   auto sql() const -> rstd::ref<rstd::str> {
     return rstd::ref<rstd::str>::from_raw_parts_unchecked(
-        sql_.data(), rstd::usize(sql_.size()));
+        sql_.data(), rstd::usize(sql_.len()));
   }
-  auto parameter_count() const -> unsigned {
+  auto parameter_count() const -> usize {
     return metadata_.parameter_count();
   }
-  auto parameter(unsigned index) const -> rstd::Option<Parameter> {
+  auto parameter(usize index) const -> rstd::Option<Parameter> {
     return metadata_.parameter(index);
   }
-  auto parameter_name(unsigned index) const -> std::string_view {
+  auto parameter_name(usize index) const -> ref<str> {
     return metadata_.parameter_name(index);
   }
-  auto parameter_has_member(unsigned index) const -> bool {
+  auto parameter_has_member(usize index) const -> bool {
     return metadata_.parameter_has_member(index);
   }
-  template <auto Member> auto parameter_is(unsigned index) const -> bool {
+  template <auto Member> auto parameter_is(usize index) const -> bool {
     return metadata_.template parameter_is<Member>(index);
   }
-  auto parameter_is_group(unsigned index) const -> bool {
+  auto parameter_is_group(usize index) const -> bool {
     return index < metadata_.parameter_count_ && groups_[index];
   }
-  auto parameter_slot(std::string_view name) const
+  auto parameter_slot(ref<str> name) const
       -> rstd::Option<rstd::usize> {
-    for (unsigned i = 0; i < metadata_.parameter_count_; ++i)
+    for (usize i = 0_usize; i < metadata_.parameter_count_; ++i)
       if (metadata_.parameter_name(i) == name && !groups_[i])
         return rstd::Some(rstd::usize(metadata_.parameters_[i].slot));
     return rstd::None();
   }
-  auto parameter_group(std::string_view name) const
+  auto parameter_group(ref<str> name) const
       -> rstd::Option<ParameterGroupSlots> {
-    for (unsigned i = 0; i < metadata_.parameter_count_; ++i)
+    for (usize i = 0_usize; i < metadata_.parameter_count_; ++i)
       if (metadata_.parameter_name(i) == name && groups_[i])
         return rstd::Some(
             ParameterGroupSlots{rstd::usize(metadata_.parameters_[i].slot),
@@ -132,7 +131,7 @@ namespace liorm::query {
 struct Source {
   Text name{};
   Id instance{};
-  unsigned table{};
+  usize table{};
   bool known{}, nullable{};
 };
 enum class FactKind { Unknown, Known, NullLiteral };
@@ -142,27 +141,27 @@ struct Fact {
 };
 struct ProjectionFacts {
   Id list{};
-  std::array<Fact, 512> values{};
+  array<Fact, 512> values{};
 };
 struct Scope {
   const Scope *parent{};
-  std::array<Source, 128> sources{};
+  array<Source, 128> sources{};
   Id write_target{};
   const ProjectionFacts *projection{};
   bool ordering{}, conflict_update{}, window_projection{};
-  unsigned count{};
+  usize count{};
 };
 struct CteScope {
   const CteScope *parent{};
-  std::array<Text, 128> names{};
-  std::array<Text, 128> reserved{};
-  unsigned reserved_count{};
-  unsigned count{};
+  array<Text, 128> names{};
+  array<Text, 128> reserved{};
+  usize reserved_count{};
+  usize count{};
 };
 struct PreparedQuery {
-  std::array<unsigned, 512> parameter_slots{};
-  std::array<Fact, 4096> facts{};
-  unsigned count{};
+  array<usize, 512> parameter_slots{};
+  array<Fact, 4096> facts{};
+  usize count{};
 };
 class Compiler {
   const QueryBuilder &builder_;
@@ -171,32 +170,31 @@ class Compiler {
   Error error_{};
   bool preparing_{true};
   bool expanded_mode_{}, measuring_{};
-  unsigned fact_cursor_{}, measured_sql_{};
+  usize fact_cursor_{}, measured_sql_{};
   ExpandedQuery *expanded_{};
   ExpansionLimits expansion_limits_{};
-  std::array<bool, 64> groups_{};
-  std::array<unsigned, 64> group_counts_{};
-  unsigned next_slot_{1};
+  array<bool, 64> groups_{};
+  array<usize, 64> group_counts_{};
+  usize next_slot_{1};
 
-  constexpr auto text(Text t) const -> std::string_view {
+  constexpr auto text(Text t) const -> ref<str> {
     return builder_.text(t);
   }
   constexpr auto node(Id id) const -> const Node & {
     return builder_.nodes_[id];
   }
-  constexpr void fail(ErrorKind kind, Id id = 0, std::string_view name = {}) {
+  constexpr void fail(ErrorKind kind, Id id = 0_usize, ref<str> name = {}) {
     if (error_.kind != ErrorKind::None)
       return;
     error_.kind = kind;
     error_.node = id;
-    error_.length = name.size() < error_.context.size()
-                        ? unsigned(name.size())
-                        : unsigned(error_.context.size());
-    error_.truncated = name.size() > error_.length;
-    for (unsigned i = 0; i < error_.length; ++i)
-      error_.context[i] = name[i];
+    error_.length = name.len() < error_.context.len() ? name.len()
+                                                      : error_.context.len();
+    error_.truncated = name.len() > error_.length;
+    for (usize i {}; i < error_.length; ++i)
+      error_.context[i] = char(name[i].to_primitive());
   }
-  constexpr auto enter(unsigned depth, Id id) -> bool {
+  constexpr auto enter(usize depth, Id id) -> bool {
     if (error_.kind != ErrorKind::None)
       return false;
     if (depth >= builder_.limits_.depth) {
@@ -210,38 +208,38 @@ class Compiler {
       return;
     if (measuring_) {
       if (measured_sql_ >= expansion_limits_.sql) {
-        fail(ErrorKind::Capacity, 0, "sql");
+        fail(ErrorKind::Capacity, 0_usize, "sql"_str);
         return;
       }
       ++measured_sql_;
       return;
     }
     if (expanded_) {
-      if (expanded_->sql_.size() >= expansion_limits_.sql) {
-        fail(ErrorKind::Capacity, 0, "sql");
+      if (expanded_->sql_.len() >= expansion_limits_.sql) {
+        fail(ErrorKind::Capacity, 0_usize, "sql"_str);
         return;
       }
       expanded_->sql_.push_back(rstd::byte{static_cast<unsigned char>(c)});
       return;
     }
     if (result_.sql_size_ >= builder_.limits_.sql) {
-      fail(ErrorKind::Capacity, 0, "sql");
+      fail(ErrorKind::Capacity, 0_usize, "sql"_str);
       return;
     }
     result_.sql_[result_.sql_size_++] =
         rstd::byte{static_cast<unsigned char>(c)};
   }
-  constexpr void out(std::string_view value) {
+  constexpr void out(ref<str> value) {
     if (measuring_ && !preparing_ && error_.kind == ErrorKind::None) {
-      if (value.size() > expansion_limits_.sql - measured_sql_) {
-        fail(ErrorKind::Capacity, 0, "sql");
+      if (value.len() > expansion_limits_.sql - measured_sql_) {
+        fail(ErrorKind::Capacity, 0_usize, "sql"_str);
         return;
       }
-      measured_sql_ += unsigned(value.size());
+      measured_sql_ += usize(value.len());
       return;
     }
-    for (char c : value)
-      out(c);
+    for (usize i {}; i < value.len(); ++i)
+      out(char(value[i].to_primitive()));
   }
   constexpr void number(long long value) {
     unsigned long long magnitude = static_cast<unsigned long long>(value);
@@ -250,31 +248,34 @@ class Compiler {
       magnitude = 0 - magnitude;
     }
     char digits[20]{};
-    unsigned count = 0;
+    usize count = 0_usize;
     do {
-      digits[count++] = char('0' + magnitude % 10);
+      digits[count.to_primitive()] = char('0' + magnitude % 10);
+      ++count;
       magnitude /= 10;
-    } while (magnitude);
-    while (count)
-      out(digits[--count]);
+    } while (magnitude != 0);
+    while (count != 0_usize)
+      out(digits[(--count).to_primitive()]);
   }
   constexpr void quote(Text value, char delimiter = '"') {
     if (measuring_ && error_.kind == ErrorKind::None) {
       // Every non-ASCII SQL byte comes from quoted builder text. Validate it
       // before allocating the planned output, using the same UTF-8 checker.
       auto raw = text(value);
-      std::array<rstd::byte, 8192> bytes{};
-      for (unsigned i = 0; i < raw.size(); ++i)
-        bytes[i] = rstd::byte{static_cast<unsigned char>(raw[i])};
+      array<rstd::byte, 8192> bytes{};
+      for (usize i = 0_usize; i < raw.len(); ++i)
+        bytes[i] = rstd::byte {static_cast<unsigned char>(raw[i].to_primitive())};
       if (rstd::str_::from_utf8(rstd::slice<rstd::u8>::from_raw_parts(
-                                    bytes.data(), rstd::usize(raw.size())))
+                                    bytes.data(), rstd::usize(raw.len())))
               .is_err()) {
         fail(ErrorKind::InvalidName);
         return;
       }
     }
     out(delimiter);
-    for (char c : text(value)) {
+    auto quoted = text(value);
+    for (usize i {}; i < quoted.len(); ++i) {
+      char c = char(quoted[i].to_primitive());
       out(c);
       if (c == delimiter)
         out(c);
@@ -285,17 +286,17 @@ class Compiler {
     return same_name(text(a), text(b));
   }
   constexpr void qualifier(Text value, const Scope *scope, Id id) {
-    if (!preparing_ || !value.length)
+    if (! preparing_ || value.length == 0_usize)
       return;
     for (auto s = scope; s; s = s->parent)
-      for (unsigned i = 0; i < s->count; ++i)
+      for (usize i = 0_usize; i < s->count; ++i)
         if (same(value, s->sources[i].name))
           return;
     fail(ErrorKind::UnknownQualifier, id, text(value));
   }
   constexpr auto cte_known(Text value, const CteScope *scope) const -> bool {
     for (auto s = scope; s; s = s->parent)
-      for (unsigned i = 0; i < s->count; ++i)
+      for (usize i = 0_usize; i < s->count; ++i)
         if (same(value, s->names[i]))
           return true;
     return false;
@@ -303,49 +304,49 @@ class Compiler {
   constexpr void register_source(Id id, Scope &scope, bool nullable = false) {
     if (!preparing_)
       return;
-    if (!id) {
-      fail(ErrorKind::InvalidShape, id, "source");
+    if (id == 0_usize) {
+      fail(ErrorKind::InvalidShape, id, "source"_str);
       return;
     }
     auto n = node(id);
     Text name =
-        n.kind == Kind::Table && n.qualifier.length ? n.qualifier : n.name;
+        n.kind == Kind::Table && n.qualifier.length != 0_usize ? n.qualifier : n.name;
     if (n.kind == Kind::Alias) {
       auto k = node(n.a).kind;
-      if ((k != Kind::Table && k != Kind::Cte) || node(n.a).qualifier.length) {
-        fail(ErrorKind::InvalidShape, id, "source alias");
+      if ((k != Kind::Table && k != Kind::Cte) || node(n.a).qualifier.length != 0_usize) {
+        fail(ErrorKind::InvalidShape, id, "source alias"_str);
         return;
       }
     } else if (n.kind != Kind::Table && n.kind != Kind::Cte &&
                n.kind != Kind::Derived) {
-      fail(ErrorKind::InvalidShape, id, "source");
+      fail(ErrorKind::InvalidShape, id, "source"_str);
       return;
     }
-    for (unsigned i = 0; i < scope.count; ++i)
+    for (usize i = 0_usize; i < scope.count; ++i)
       if (same(name, scope.sources[i].name)) {
         fail(ErrorKind::DuplicateName, id, text(name));
         return;
       }
-    if (scope.count == scope.sources.size()) {
-      fail(ErrorKind::Capacity, id, "sources");
+    if (scope.count == scope.sources.len()) {
+      fail(ErrorKind::Capacity, id, "sources"_str);
       return;
     }
     const auto &base = n.kind == Kind::Alias ? node(n.a) : n;
     scope.sources[scope.count++] = {name, id, base.table,
-                                    bool(base.registration), nullable};
+                                    base.registration != 0_usize, nullable};
   }
   constexpr auto column(Id id, const Scope *scope, bool target,
                         bool alias_first = false) -> Fact {
     const auto &n = node(id);
     auto from = [&](const Source &source) -> Fact {
-      if (n.source && n.source != source.instance) {
+      if (n.source != 0_usize && n.source != source.instance) {
         fail(ErrorKind::InvalidSource, id, text(n.name));
         return {};
       }
       if (!source.known)
         return {};
-      unsigned column_id = n.column;
-      if (n.registration) {
+      usize column_id = n.column;
+      if (n.registration != 0_usize) {
         if (source.table != n.table) {
           fail(ErrorKind::InvalidSource, id, text(n.name));
           return {};
@@ -364,33 +365,33 @@ class Compiler {
       return {FactKind::Known, type};
     };
     if (target) {
-      if (!scope || !scope->write_target) {
-        fail(ErrorKind::InvalidShape, id, "write target");
+      if (! scope || scope->write_target == 0_usize) {
+        fail(ErrorKind::InvalidShape, id, "write target"_str);
         return {};
       }
-      if (n.qualifier.length && !n.source) {
-        fail(ErrorKind::InvalidShape, id, "unqualified column");
+      if (n.qualifier.length != 0_usize && n.source == 0_usize) {
+        fail(ErrorKind::InvalidShape, id, "unqualified column"_str);
         return {};
       }
-      return from(scope->sources[0]);
+      return from(scope->sources[0_usize]);
     }
-    if (n.qualifier.length) {
+    if (n.qualifier.length != 0_usize) {
       for (auto s = scope; s; s = s->parent)
-        for (unsigned i = 0; i < s->count; ++i)
+        for (usize i = 0_usize; i < s->count; ++i)
           if (same(n.qualifier, s->sources[i].name))
             return from(s->sources[i]);
-      fail(n.source ? ErrorKind::InvalidSource : ErrorKind::UnknownQualifier,
+      fail(n.source != 0_usize ? ErrorKind::InvalidSource : ErrorKind::UnknownQualifier,
            id, text(n.qualifier));
       return {};
     }
-    auto alias = [&](const Scope *s) -> std::optional<Fact> {
+    auto alias = [&](const Scope *s) -> Option<Fact> {
       if (!s || !s->ordering || !s->projection)
         return {};
-      unsigned index = 0;
-      for (Id l = s->projection->list; l; l = node(l).b, ++index) {
+      usize index = 0_usize;
+      for (Id l = s->projection->list; l != 0_usize; l = node(l).b, ++index) {
         const auto &projected = node(node(l).a);
         if (projected.kind == Kind::Alias && same(n.name, projected.name))
-          return s->projection->values[index];
+          return Some(Fact(s->projection->values[index]));
       }
       return {};
     };
@@ -399,11 +400,11 @@ class Compiler {
         return *found;
     bool has_sources = false;
     for (auto s = scope; s; s = s->parent) {
-      has_sources = has_sources || s->count;
-      unsigned matches = 0;
+      has_sources = has_sources || s->count != 0_usize;
+      usize matches = 0_usize;
       bool unknown = false;
       Source found;
-      for (unsigned i = 0; i < s->count; ++i) {
+      for (usize i = 0_usize; i < s->count; ++i) {
         auto source = s->sources[i];
         if (!source.known) {
           unknown = true;
@@ -414,13 +415,13 @@ class Compiler {
           found = source;
         }
       }
-      if (matches > 1) {
+      if (matches > 1_usize) {
         fail(ErrorKind::AmbiguousColumn, id, text(n.name));
         return {};
       }
       if (unknown)
         return {};
-      if (matches)
+      if (matches != 0_usize)
         return from(found);
       if (auto projected = alias(s))
         return *projected;
@@ -432,7 +433,7 @@ class Compiler {
   constexpr void compatible(Fact a, Fact b, Id id) {
     if (a.kind == FactKind::Known && b.kind == FactKind::Known &&
         !comparable(a.type.kind, b.type.kind))
-      fail(ErrorKind::TypeMismatch, id, "comparison");
+      fail(ErrorKind::TypeMismatch, id, "comparison"_str);
   }
   constexpr auto nullable(Fact f) const -> bool {
     return f.kind == FactKind::NullLiteral ||
@@ -450,13 +451,13 @@ class Compiler {
       return;
     if (value.kind == FactKind::Known &&
         !assignable(target.type.kind, value.type.kind))
-      fail(ErrorKind::TypeMismatch, id, "assignment");
+      fail(ErrorKind::TypeMismatch, id, "assignment"_str);
     if (!target.type.nullable && nullable(value))
-      fail(ErrorKind::NullableAssignment, id, "assignment");
+      fail(ErrorKind::NullableAssignment, id, "assignment"_str);
   }
-  constexpr auto count(Id list) const -> unsigned {
-    unsigned n = 0;
-    for (; list; list = node(list).b)
+  constexpr auto count(Id list) const -> usize {
+    usize n = 0_usize;
+    for (; list != 0_usize; list = node(list).b)
       ++n;
     return n;
   }
@@ -465,19 +466,20 @@ class Compiler {
     if (preparing_) {
       if (group && !expanded_mode_) {
         fail(ErrorKind::InvalidShape, id,
-             "parameter group requires runtime expansion");
+             "parameter group requires runtime expansion"_str);
         return;
       }
-      if (unsigned(n.type.kind) > unsigned(ParameterKind::Blob)) {
+      if (usize(static_cast<rstd::size_t>(n.type.kind)) >
+        usize(static_cast<rstd::size_t>(ParameterKind::Blob))) {
         fail(ErrorKind::UnsupportedType, id, text(n.name));
         return;
       }
       auto name = text(n.name);
-      unsigned index = 0;
+      usize index = 0_usize;
       for (; index < result_.parameter_count_; ++index)
         if (result_.parameter_name(index) == name)
           break;
-      unsigned amount = group ? unsigned(n.integer) : 1;
+      usize amount = group ? usize(static_cast<rstd::size_t>(n.integer)) : 1_usize;
       if (index < result_.parameter_count_) {
         if (result_.parameters_[index].type != n.type ||
             result_.member_identities_[index] != n.member_identity ||
@@ -486,85 +488,92 @@ class Compiler {
           fail(ErrorKind::ParameterConflict, id, name);
       } else {
         if (index >= builder_.limits_.parameters ||
-            name.size() > result_.names_.size() - result_.name_size_) {
-          fail(ErrorKind::Capacity, id, "parameters");
+            name.len() > result_.names_.len() - result_.name_size_) {
+          fail(ErrorKind::Capacity, id, "parameters"_str);
           return;
         }
-        if (expanded_mode_ &&
-            (next_slot_ > expansion_limits_.parameters + 1ULL ||
-             amount > expansion_limits_.parameters + 1ULL - next_slot_ ||
-             amount > 2147483648ULL - next_slot_)) {
-          fail(ErrorKind::Capacity, id, "parameters");
-          return;
+        if (expanded_mode_) {
+          constexpr auto slot_limit = 2147483648ULL;
+          const auto next =
+              static_cast<unsigned long long>(next_slot_.to_primitive());
+          const auto add =
+              static_cast<unsigned long long>(amount.to_primitive());
+          auto ceiling = static_cast<unsigned long long>(
+              expansion_limits_.parameters.to_primitive());
+          if (ceiling != static_cast<unsigned long long>(-1)) ++ceiling;
+          if (next + add > ceiling || next + add > slot_limit) {
+            fail(ErrorKind::Capacity, id, "parameters"_str);
+            return;
+          }
         }
-        unsigned slot = amount ? next_slot_ : 0;
+        usize slot = amount != 0_usize ? next_slot_ : 0_usize;
         result_.parameters_[index] = {slot, n.type, result_.name_size_,
-                                      unsigned(name.size())};
+                                      usize(name.len())};
         result_.member_identities_[index] = n.member_identity;
         groups_[index] = group;
         group_counts_[index] = amount;
         next_slot_ += amount;
-        for (char c : name)
-          result_.names_[result_.name_size_++] = c;
+        for (usize c {}; c < name.len(); ++c)
+          result_.names_[result_.name_size_++] = rstd::byte {name[c].to_primitive()};
         ++result_.parameter_count_;
       }
       prepared_.parameter_slots[id] = result_.parameters_[index].slot;
     } else if (group) {
-      unsigned first = prepared_.parameter_slots[id];
-      for (unsigned i = 0;
-           i < unsigned(n.integer) && error_.kind == ErrorKind::None; ++i) {
-        if (i)
-          out(", ");
+      usize first = prepared_.parameter_slots[id];
+      for (usize i = 0_usize;
+           i < usize(n.integer) && error_.kind == ErrorKind::None; ++i) {
+        if (i != 0_usize)
+          out(", "_str);
         out('?');
-        number(static_cast<long long>(first) + i);
+        number(static_cast<long long>(first.to_primitive() + i.to_primitive()));
       }
     } else {
       out('?');
-      number(prepared_.parameter_slots[id]);
+      number(static_cast<long long>(prepared_.parameter_slots[id].to_primitive()));
     }
   }
   enum class Use { Value, Projection, Ordering, Assignment, Column };
   constexpr void expressions(Id list, const Scope *scope, const CteScope *ctes,
-                             unsigned depth, Use use = Use::Value,
+                             usize depth, Use use = Use::Value,
                              ProjectionFacts *projection = nullptr) {
     bool first = true;
-    unsigned index = 0;
-    for (; list && error_.kind == ErrorKind::None; list = node(list).b) {
+    usize index = 0_usize;
+    for (; list != 0_usize && error_.kind == ErrorKind::None; list = node(list).b) {
       if (!first)
-        out(", ");
+        out(", "_str);
       first = false;
-      auto fact = expression(node(list).a, scope, ctes, depth + 1, use);
+      auto fact = expression(node(list).a, scope, ctes, depth + 1_usize, use);
       if (projection)
         projection->values[index++] = fact;
     }
   }
   constexpr void scalar_query(Id id, const Scope *scope, const CteScope *ctes,
-                              unsigned depth, bool one) {
+                              usize depth, bool one) {
     const auto &q = builder_.queries_[id];
     if (preparing_ &&
         (q.kind != StatementKind::Select ||
-         (one && (count(q.get(Slot::Projection)) != 1 ||
+         (one && (count(q.get(Slot::Projection)) != 1_usize ||
                   node(node(q.get(Slot::Projection)).a).kind == Kind::Star)))) {
-      fail(ErrorKind::InvalidShape, id, "subquery projection");
+      fail(ErrorKind::InvalidShape, id, "subquery projection"_str);
       return;
     }
     out('(');
-    query(id, scope, ctes, depth + 1);
+    query(id, scope, ctes, depth + 1_usize);
     out(')');
   }
   constexpr auto expression(Id id, const Scope *scope, const CteScope *ctes,
-                            unsigned depth, Use use = Use::Value) -> Fact {
+                            usize depth, Use use = Use::Value) -> Fact {
     if (!enter(depth, id))
       return {};
-    if (!id) {
+    if (id == 0_usize) {
       fail(ErrorKind::InvalidHandle);
       return {};
     }
     const auto &n = node(id);
-    unsigned occurrence = 0;
+    usize occurrence = 0_usize;
     if (preparing_) {
-      if (prepared_.count == prepared_.facts.size()) {
-        fail(ErrorKind::Capacity, id, "expression uses");
+      if (prepared_.count == prepared_.facts.len()) {
+        fail(ErrorKind::Capacity, id, "expression uses"_str);
         return {};
       }
       occurrence = prepared_.count++;
@@ -572,19 +581,19 @@ class Compiler {
       occurrence = fact_cursor_++;
     Fact fact;
     if (preparing_ && use == Use::Column &&
-        (n.kind != Kind::Column || (n.qualifier.length && !n.source))) {
-      fail(ErrorKind::InvalidShape, id, "unqualified column");
+        (n.kind != Kind::Column || (n.qualifier.length != 0_usize && n.source == 0_usize))) {
+      fail(ErrorKind::InvalidShape, id, "unqualified column"_str);
       return {};
     }
     if (preparing_ && use == Use::Assignment && n.kind != Kind::Assignment) {
-      fail(ErrorKind::InvalidShape, id, "assignment");
+      fail(ErrorKind::InvalidShape, id, "assignment"_str);
       return {};
     }
     switch (n.kind) {
     case Kind::Column:
       if (preparing_)
         fact = column(id, scope, use == Use::Column, use == Use::Ordering);
-      if (n.qualifier.length && use != Use::Column) {
+      if (n.qualifier.length != 0_usize && use != Use::Column) {
         quote(n.qualifier);
         out('.');
       }
@@ -592,29 +601,29 @@ class Compiler {
       break;
     case Kind::Excluded:
       if (preparing_) {
-        if (!scope || !scope->conflict_update || !scope->write_target || !n.a ||
+        if (!scope || ! scope->conflict_update || scope->write_target == 0_usize || n.a == 0_usize ||
             node(n.a).kind != Kind::Column) {
-          fail(ErrorKind::InvalidShape, id, "excluded scope");
+          fail(ErrorKind::InvalidShape, id, "excluded scope"_str);
           return {};
         }
         // SQLite resolves a real target named excluded before its proposed-row
         // pseudo-table. Write aliases are not supported by this API yet.
-        if (same_name(text(node(scope->write_target).name), "excluded")) {
-          fail(ErrorKind::InvalidShape, id, "excluded target name");
+        if (same_name(text(node(scope->write_target).name), "excluded"_str)) {
+          fail(ErrorKind::InvalidShape, id, "excluded target name"_str);
           return {};
         }
         fact = column(n.a, scope, true);
       }
-      out("\"excluded\".");
+      out("\"excluded\"."_str);
       quote(node(n.a).name);
       break;
     case Kind::Star:
       if (preparing_ && use != Use::Projection) {
-        fail(ErrorKind::InvalidShape, id, "star");
+        fail(ErrorKind::InvalidShape, id, "star"_str);
         return {};
       }
       qualifier(n.qualifier, scope, id);
-      if (n.qualifier.length) {
+      if (n.qualifier.length != 0_usize) {
         quote(n.qualifier);
         out('.');
       }
@@ -630,40 +639,41 @@ class Compiler {
       break;
     case Kind::Null:
       fact = {FactKind::NullLiteral, {}};
-      out("NULL");
+      out("NULL"_str);
       break;
     case Kind::Parameter:
       fact = {FactKind::Known, n.type};
       parameter(id);
       break;
     case Kind::Binary: {
-      constexpr std::string_view ops[] = {
-          " = ", " <> ", " < ", " <= ",  " > ",  " >= ",  " + ",
-          " - ", " * ",  " / ", " AND ", " OR ", " LIKE "};
-      if (n.operation >= std::size(ops)) {
-        fail(ErrorKind::InvalidShape, id, "operator");
+      constexpr array<ref<str>, 13> ops {
+          " = "_str, " <> "_str, " < "_str, " <= "_str, " > "_str, " >= "_str,
+          " + "_str, " - "_str, " * "_str, " / "_str, " AND "_str, " OR "_str,
+          " LIKE "_str};
+      if (n.operation >= ops.len()) {
+        fail(ErrorKind::InvalidShape, id, "operator"_str);
         return {};
       }
       out('(');
-      auto a = expression(n.a, scope, ctes, depth + 1);
-      out(ops[n.operation]);
-      auto b = expression(n.b, scope, ctes, depth + 1);
+      auto a = expression(n.a, scope, ctes, depth + 1_usize);
+      out(ops[usize(n.operation.to_primitive())]);
+      auto b = expression(n.b, scope, ctes, depth + 1_usize);
       if (preparing_) {
-        auto op = Binary(n.operation);
+        auto op = Binary(static_cast<int>(n.operation.to_primitive()));
         if (op <= Binary::GreaterEqual) {
           compatible(a, b, id);
           fact = boolean(a, b);
         } else if (op == Binary::Like) {
           if ((a.kind == FactKind::Known && a.type.kind != ValueKind::Text) ||
               (b.kind == FactKind::Known && b.type.kind != ValueKind::Text))
-            fail(ErrorKind::TypeMismatch, id, "LIKE");
+            fail(ErrorKind::TypeMismatch, id, "LIKE"_str);
           fact = boolean(a, b);
         } else if (op >= Binary::And)
           fact = boolean(a, b);
         else {
           if ((a.kind == FactKind::Known && !numeric(a.type.kind)) ||
               (b.kind == FactKind::Known && !numeric(b.type.kind)))
-            fail(ErrorKind::TypeMismatch, id, "arithmetic");
+            fail(ErrorKind::TypeMismatch, id, "arithmetic"_str);
           if (a.kind == FactKind::NullLiteral ||
               b.kind == FactKind::NullLiteral)
             fact = {FactKind::NullLiteral, {}};
@@ -684,60 +694,60 @@ class Compiler {
     case Kind::IsNotNull: {
       out('(');
       if (n.kind == Kind::Not)
-        out("NOT ");
-      auto operand = expression(n.a, scope, ctes, depth + 1);
+        out("NOT "_str);
+      auto operand = expression(n.a, scope, ctes, depth + 1_usize);
       fact = n.kind == Kind::Not
                  ? boolean(operand)
                  : Fact{FactKind::Known, {ValueKind::Boolean, false}};
       if (n.kind == Kind::IsNull)
-        out(" IS NULL");
+        out(" IS NULL"_str);
       if (n.kind == Kind::IsNotNull)
-        out(" IS NOT NULL");
+        out(" IS NOT NULL"_str);
       out(')');
       break;
     }
     case Kind::Alias:
       if (preparing_ && use != Use::Projection) {
-        fail(ErrorKind::InvalidShape, id, "projection alias");
+        fail(ErrorKind::InvalidShape, id, "projection alias"_str);
         return {};
       }
-      fact = expression(n.a, scope, ctes, depth + 1);
-      out(" AS ");
+      fact = expression(n.a, scope, ctes, depth + 1_usize);
+      out(" AS "_str);
       quote(n.name);
       break;
     case Kind::Order:
       if (preparing_ && use != Use::Ordering) {
-        fail(ErrorKind::InvalidShape, id, "ordering");
+        fail(ErrorKind::InvalidShape, id, "ordering"_str);
         return {};
       }
-      fact = expression(n.a, scope, ctes, depth + 1, Use::Ordering);
-      out(n.flag ? " DESC" : " ASC");
+      fact = expression(n.a, scope, ctes, depth + 1_usize, Use::Ordering);
+      out(n.flag ? " DESC"_str : " ASC"_str);
       break;
     case Kind::Assignment: {
       if (preparing_ && use != Use::Assignment) {
-        fail(ErrorKind::InvalidShape, id, "assignment");
+        fail(ErrorKind::InvalidShape, id, "assignment"_str);
         return {};
       }
-      auto target = expression(n.a, scope, ctes, depth + 1, Use::Column);
-      out(" = ");
-      auto value = expression(n.b, scope, ctes, depth + 1);
+      auto target = expression(n.a, scope, ctes, depth + 1_usize, Use::Column);
+      out(" = "_str);
+      auto value = expression(n.b, scope, ctes, depth + 1_usize);
       if (preparing_)
         assignment(target, value, id);
       break;
     }
     case Kind::In: {
-      if (preparing_ && !n.b) {
-        fail(ErrorKind::InvalidShape, id, "empty IN");
+      if (preparing_ && n.b == 0_usize) {
+        fail(ErrorKind::InvalidShape, id, "empty IN"_str);
         return {};
       }
       out('(');
-      auto a = expression(n.a, scope, ctes, depth + 1);
-      out(" IN (");
+      auto a = expression(n.a, scope, ctes, depth + 1_usize);
+      out(" IN ("_str);
       fact = boolean(a);
-      for (Id l = n.b; l; l = node(l).b) {
+      for (Id l = n.b; l != 0_usize; l = node(l).b) {
         if (l != n.b)
-          out(", ");
-        auto b = expression(node(l).a, scope, ctes, depth + 2);
+          out(", "_str);
+        auto b = expression(node(l).a, scope, ctes, depth + 2_usize);
         if (preparing_) {
           compatible(a, b, id);
           if (b.kind == FactKind::Unknown)
@@ -746,18 +756,18 @@ class Compiler {
             fact.type.nullable = true;
         }
       }
-      out("))");
+      out("))"_str);
       break;
     }
     case Kind::InGroup: {
       const auto &group = node(n.b);
-      if (!n.b || group.kind != Kind::ParameterGroup) {
-        fail(ErrorKind::InvalidShape, id, "parameter group");
+      if (n.b == 0_usize || group.kind != Kind::ParameterGroup) {
+        fail(ErrorKind::InvalidShape, id, "parameter group"_str);
         return {};
       }
       out('(');
-      auto a = expression(n.a, scope, ctes, depth + 1);
-      out(" IN (");
+      auto a = expression(n.a, scope, ctes, depth + 1_usize);
+      out(" IN ("_str);
       parameter(n.b, true);
       if (preparing_) {
         Fact b{FactKind::Known, group.type};
@@ -766,69 +776,69 @@ class Compiler {
                    ? Fact{FactKind::Known, {ValueKind::Boolean, false}}
                    : boolean(a, b);
       }
-      out("))");
+      out("))"_str);
       break;
     }
     case Kind::InQuery:
       out('(');
-      expression(n.a, scope, ctes, depth + 1);
-      out(" IN ");
-      scalar_query(n.b, scope, ctes, depth + 1, true);
+      expression(n.a, scope, ctes, depth + 1_usize);
+      out(" IN "_str);
+      scalar_query(n.b, scope, ctes, depth + 1_usize, true);
       out(')');
       break;
     case Kind::Scalar:
-      scalar_query(n.a, scope, ctes, depth + 1, true);
+      scalar_query(n.a, scope, ctes, depth + 1_usize, true);
       break;
     case Kind::Exists:
       fact = {FactKind::Known, {ValueKind::Boolean, false}};
-      out("EXISTS ");
-      scalar_query(n.a, scope, ctes, depth + 1, false);
+      out("EXISTS "_str);
+      scalar_query(n.a, scope, ctes, depth + 1_usize, false);
       break;
     case Kind::RowNumber: {
-      if (preparing_ && (!scope || !scope->window_projection || !n.a)) {
-        fail(ErrorKind::InvalidShape, id, "window projection");
+      if (preparing_ && (! scope || ! scope->window_projection || n.a == 0_usize)) {
+        fail(ErrorKind::InvalidShape, id, "window projection"_str);
         return {};
       }
       fact = {FactKind::Known, {ValueKind::Integer, false}};
-      out("ROW_NUMBER() OVER (ORDER BY ");
+      out("ROW_NUMBER() OVER (ORDER BY "_str);
       Scope ordering_scope = scope ? *scope : Scope{};
       ordering_scope.window_projection = false;
       ordering_scope.ordering = false;
       ordering_scope.projection = nullptr;
-      expressions(n.a, &ordering_scope, ctes, depth + 1, Use::Ordering);
+      expressions(n.a, &ordering_scope, ctes, depth + 1_usize, Use::Ordering);
       out(')');
       break;
     }
     case Kind::Function: {
-      constexpr std::string_view names[] = {
-          "COUNT", "SUM",   "AVG",    "MIN",      "MAX",
-          "LOWER", "UPPER", "LENGTH", "COALESCE", "ABS"};
-      unsigned arity = count(n.a);
-      if (n.operation >= std::size(names) ||
-          (n.operation == unsigned(Function::Coalesce) ? arity < 2
-                                                       : arity != 1)) {
-        fail(ErrorKind::InvalidShape, id, "function arity");
+      constexpr array<ref<str>, 10> names {
+          "COUNT"_str, "SUM"_str,  "AVG"_str,    "MIN"_str, "MAX"_str,
+          "LOWER"_str, "UPPER"_str, "LENGTH"_str, "COALESCE"_str, "ABS"_str};
+      usize arity = count(n.a);
+      if (n.operation >= names.len() ||
+          (n.operation == usize(static_cast<rstd::size_t>(Function::Coalesce)) ? arity < 2_usize
+                                                       : arity != 1_usize)) {
+        fail(ErrorKind::InvalidShape, id, "function arity"_str);
         return {};
       }
       out(names[n.operation]);
       out('(');
-      if (n.operation == unsigned(Function::Count) &&
+      if (n.operation == usize(static_cast<rstd::size_t>(Function::Count)) &&
           node(node(n.a).a).kind == Kind::Star) {
-        if (preparing_ && node(node(n.a).a).qualifier.length) {
-          fail(ErrorKind::InvalidShape, id, "COUNT star");
+        if (preparing_ && node(node(n.a).a).qualifier.length != 0_usize) {
+          fail(ErrorKind::InvalidShape, id, "COUNT star"_str);
           return {};
         }
         out('*');
         fact = {FactKind::Known, {ValueKind::Integer, false}};
       } else {
-        auto f = Function(n.operation);
+        auto f = Function(static_cast<int>(n.operation.to_primitive()));
         bool aggregate =
             f == Function::Count || f == Function::Sum || f == Function::Avg ||
-            ((f == Function::Min || f == Function::Max) && arity == 1);
-        std::optional<Scope> aggregate_scope;
+            ((f == Function::Min || f == Function::Max) && arity == 1_usize);
+        Option<Scope> aggregate_scope;
         const Scope *argument_scope = scope;
         if (aggregate && scope) {
-          aggregate_scope.emplace(*scope);
+          aggregate_scope = Some(Scope(*scope));
           aggregate_scope->window_projection = false;
           argument_scope = &*aggregate_scope;
         }
@@ -836,13 +846,13 @@ class Compiler {
         Fact argument;
         bool coalesce_known = true, coalesce_nonnull = false;
         bool only_null = true;
-        for (Id l = n.a; l; l = node(l).b) {
+        for (Id l = n.a; l != 0_usize; l = node(l).b) {
           if (!first)
-            out(", ");
-          auto v = expression(node(l).a, argument_scope, ctes, depth + 2);
+            out(", "_str);
+          auto v = expression(node(l).a, argument_scope, ctes, depth + 2_usize);
           if (first)
             argument = v;
-          if (Function(n.operation) == Function::Coalesce) {
+          if (Function(static_cast<int>(n.operation.to_primitive())) == Function::Coalesce) {
             if (v.kind == FactKind::Unknown)
               coalesce_known = false;
             if (v.kind == FactKind::Known) {
@@ -896,14 +906,14 @@ class Compiler {
       break;
     }
     default:
-      fail(ErrorKind::InvalidShape, id, "expression");
+      fail(ErrorKind::InvalidShape, id, "expression"_str);
       break;
     }
     if (preparing_)
       prepared_.facts[occurrence] = fact;
     return preparing_ ? fact : prepared_.facts[occurrence];
   }
-  constexpr void source(Id id, const CteScope *ctes, unsigned depth) {
+  constexpr void source(Id id, const CteScope *ctes, usize depth) {
     if (!enter(depth, id))
       return;
     auto n = node(id);
@@ -911,15 +921,15 @@ class Compiler {
     case Kind::Table:
       if (preparing_) {
         for (auto s = ctes; s; s = s->parent)
-          for (unsigned i = 0; i < s->reserved_count; ++i)
+          for (usize i = 0_usize; i < s->reserved_count; ++i)
             if (same(n.name, s->reserved[i])) {
-              fail(ErrorKind::UnknownCte, id, "CTE reference requires cte()");
+              fail(ErrorKind::UnknownCte, id, "CTE reference requires cte()"_str);
               return;
             }
       }
       quote(n.name);
-      if (n.qualifier.length) {
-        out(" AS ");
+      if (n.qualifier.length != 0_usize) {
+        out(" AS "_str);
         quote(n.qualifier);
       }
       break;
@@ -931,39 +941,39 @@ class Compiler {
       quote(n.name);
       break;
     case Kind::Derived:
-      scalar_query(n.a, nullptr, ctes, depth + 1, false);
-      out(" AS ");
+      scalar_query(n.a, nullptr, ctes, depth + 1_usize, false);
+      out(" AS "_str);
       quote(n.name);
       break;
     case Kind::Alias:
-      source(n.a, ctes, depth + 1);
-      out(" AS ");
+      source(n.a, ctes, depth + 1_usize);
+      out(" AS "_str);
       quote(n.name);
       break;
     default:
-      fail(ErrorKind::InvalidShape, id, "source");
+      fail(ErrorKind::InvalidShape, id, "source"_str);
       break;
     }
   }
   constexpr void unique_columns(Id list, bool assignments) {
     if (!preparing_)
       return;
-    for (Id a = list; a; a = node(a).b) {
+    for (Id a = list; a != 0_usize; a = node(a).b) {
       Id ai = node(a).a;
       if (assignments)
         ai = node(ai).a;
       if (node(ai).kind != Kind::Column ||
-          (node(ai).qualifier.length && !node(ai).source)) {
-        fail(ErrorKind::InvalidShape, ai, "column");
+          (node(ai).qualifier.length != 0_usize && node(ai).source == 0_usize)) {
+        fail(ErrorKind::InvalidShape, ai, "column"_str);
         return;
       }
-      for (Id b = node(a).b; b; b = node(b).b) {
+      for (Id b = node(a).b; b != 0_usize; b = node(b).b) {
         Id bi = node(b).a;
         if (assignments)
           bi = node(bi).a;
         const auto &x = node(ai);
         const auto &y = node(bi);
-        bool duplicate = x.registration && y.registration
+        bool duplicate = x.registration != 0_usize && y.registration != 0_usize
                              ? x.source == y.source && x.column == y.column
                              : same(x.name, y.name);
         if (duplicate) {
@@ -974,14 +984,14 @@ class Compiler {
     }
   }
   constexpr void group_values(Id id, Id columns, const Scope *scope,
-                              unsigned depth) {
+                              usize depth) {
     if (!enter(depth, id))
       return;
     auto groups = node(id).a;
     if (preparing_) {
       // One validation per column, not per expanded cell: the AST and facts
       // remain bounded independently of the number of VALUES rows.
-      for (Id l = groups; l && error_.kind == ErrorKind::None;
+      for (Id l = groups; l != 0_usize && error_.kind == ErrorKind::None;
            l = node(l).b, columns = node(columns).b) {
         auto group_id = node(l).a;
         const auto &group = node(group_id);
@@ -991,87 +1001,91 @@ class Compiler {
       }
       return;
     }
-    auto rows = unsigned(node(node(groups).a).integer);
-    for (unsigned row = 0; row < rows && error_.kind == ErrorKind::None;
+    auto rows = usize(node(node(groups).a).integer);
+    for (usize row = 0_usize; row < rows && error_.kind == ErrorKind::None;
          ++row) {
-      if (row)
-        out(", ");
+      if (row != 0_usize)
+        out(", "_str);
       out('(');
-      for (Id l = groups; l && error_.kind == ErrorKind::None; l = node(l).b) {
+      for (Id l = groups; l != 0_usize && error_.kind == ErrorKind::None; l = node(l).b) {
         if (l != groups)
-          out(", ");
+          out(", "_str);
         out('?');
-        number(static_cast<long long>(prepared_.parameter_slots[node(l).a]) +
-               row);
+        number(static_cast<long long>(prepared_.parameter_slots[node(l).a]
+                                          .to_primitive()) +
+               static_cast<long long>(row.to_primitive()));
       }
       out(')');
     }
   }
   constexpr void shape(const QueryData &q, Id id) {
-    if (!preparing_)
+    if (! preparing_)
       return;
     auto get = [&](Slot s) { return q.get(s); };
+    auto set = [&](Slot s) { return q.get(s) != 0_usize; };
     if (q.kind == StatementKind::Select) {
-      if (!get(Slot::Projection) || get(Slot::Values) || get(Slot::Sets) ||
-          get(Slot::Conflict) || get(Slot::ConflictSets) ||
-          get(Slot::Returning) || q.allow_all || q.default_values ||
-          (get(Slot::Joins) && !get(Slot::Source)) ||
-          (get(Slot::Having) && !get(Slot::Group)) ||
-          (get(Slot::Offset) && !get(Slot::Limit)))
-        fail(ErrorKind::InvalidShape, id, "SELECT");
+      if (! set(Slot::Projection) || set(Slot::Values) || set(Slot::Sets) ||
+          set(Slot::Conflict) || set(Slot::ConflictSets) || set(Slot::Returning) ||
+          q.allow_all || q.default_values ||
+          (set(Slot::Joins) && ! set(Slot::Source)) ||
+          (set(Slot::Having) && ! set(Slot::Group)) ||
+          (set(Slot::Offset) && ! set(Slot::Limit)))
+        fail(ErrorKind::InvalidShape, id, "SELECT"_str);
     } else {
-      if (!get(Slot::Source) || node(get(Slot::Source)).kind != Kind::Table ||
-          node(get(Slot::Source)).qualifier.length || q.distinct ||
-          get(Slot::Group) || get(Slot::Having) || get(Slot::Order) ||
-          get(Slot::Limit) || get(Slot::Offset) || get(Slot::Joins))
-        fail(ErrorKind::InvalidShape, id, "write clauses");
+      if (! set(Slot::Source) || node(get(Slot::Source)).kind != Kind::Table ||
+          node(get(Slot::Source)).qualifier.length != 0_usize || q.distinct ||
+          set(Slot::Group) || set(Slot::Having) || set(Slot::Order) ||
+          set(Slot::Limit) || set(Slot::Offset) || set(Slot::Joins))
+        fail(ErrorKind::InvalidShape, id, "write clauses"_str);
       if (q.kind == StatementKind::Insert) {
         auto values = get(Slot::Values);
-        bool grouped = values && node(values).kind == Kind::ValuesGroups;
+        bool grouped = values != 0_usize && node(values).kind == Kind::ValuesGroups;
         auto inputs = grouped ? node(values).a : values;
         if ((q.default_values &&
-             (get(Slot::Projection) || values || get(Slot::Conflict) ||
-              get(Slot::ConflictSets))) ||
-            (!q.default_values &&
-             (!get(Slot::Projection) || !inputs ||
+             (get(Slot::Projection) != 0_usize || values != 0_usize ||
+              get(Slot::Conflict) != 0_usize || get(Slot::ConflictSets) != 0_usize)) ||
+            (! q.default_values &&
+             (get(Slot::Projection) == 0_usize || inputs == 0_usize ||
               count(get(Slot::Projection)) != count(inputs))) ||
-            (get(Slot::ConflictSets) && !get(Slot::Conflict)) ||
-            get(Slot::Where) || get(Slot::Sets) || q.allow_all)
-          fail(ErrorKind::InvalidShape, id, "INSERT");
+            (get(Slot::ConflictSets) != 0_usize && get(Slot::Conflict) == 0_usize) ||
+            get(Slot::Where) != 0_usize || get(Slot::Sets) != 0_usize ||
+            q.allow_all)
+          fail(ErrorKind::InvalidShape, id, "INSERT"_str);
         if (grouped) {
           long long rows = 0;
-          for (Id l = inputs; l && error_.kind == ErrorKind::None;
+          for (Id l = inputs; l != 0_usize && error_.kind == ErrorKind::None;
                l = node(l).b) {
             const auto &group = node(node(l).a);
             if (group.kind != Kind::ParameterGroup || group.integer <= 0 ||
                 (rows && rows != group.integer)) {
-              fail(ErrorKind::InvalidShape, id, "VALUES groups");
+              fail(ErrorKind::InvalidShape, id, "VALUES groups"_str);
               break;
             }
             rows = group.integer;
           }
         }
         unique_columns(get(Slot::Projection), false);
-        if (get(Slot::Conflict))
+        if (get(Slot::Conflict) != 0_usize)
           unique_columns(get(Slot::Conflict), false);
-        if (get(Slot::ConflictSets))
+        if (get(Slot::ConflictSets) != 0_usize)
           unique_columns(get(Slot::ConflictSets), true);
       } else {
-        if (q.default_values || get(Slot::Projection) || get(Slot::Values) ||
-            get(Slot::Conflict) || get(Slot::ConflictSets) ||
-            (q.kind == StatementKind::Delete && get(Slot::Returning)) ||
-            (q.kind == StatementKind::Update ? !get(Slot::Sets)
-                                             : bool(get(Slot::Sets))))
-          fail(ErrorKind::InvalidShape, id, "UPDATE/DELETE");
-        if (!get(Slot::Where) && !q.allow_all)
+        if (q.default_values || get(Slot::Projection) != 0_usize ||
+            get(Slot::Values) != 0_usize || get(Slot::Conflict) != 0_usize ||
+            get(Slot::ConflictSets) != 0_usize ||
+            (q.kind == StatementKind::Delete && get(Slot::Returning) != 0_usize) ||
+            (q.kind == StatementKind::Update ? get(Slot::Sets) == 0_usize
+                                             : get(Slot::Sets) != 0_usize))
+          fail(ErrorKind::InvalidShape, id, "UPDATE/DELETE"_str);
+        if (get(Slot::Where) == 0_usize && !q.allow_all)
           fail(ErrorKind::UnsafeWrite, id);
-        if (get(Slot::Sets))
+        if (get(Slot::Sets) != 0_usize)
           unique_columns(get(Slot::Sets), true);
       }
     }
   }
   constexpr void query(Id id, const Scope *parent, const CteScope *outer_ctes,
-                       unsigned depth) {
+                       usize depth) {
     if (!enter(depth, id))
       return;
     const auto &q = builder_.queries_[id];
@@ -1079,97 +1093,97 @@ class Compiler {
     if (error_.kind != ErrorKind::None)
       return;
     CteScope ctes{.parent = outer_ctes};
-    for (Id l = q.get(Slot::Ctes); l; l = node(l).b) {
-      if (ctes.reserved_count == ctes.reserved.size()) {
-        fail(ErrorKind::Capacity, id, "CTEs");
+    for (Id l = q.get(Slot::Ctes); l != 0_usize; l = node(l).b) {
+      if (ctes.reserved_count == ctes.reserved.len()) {
+        fail(ErrorKind::Capacity, id, "CTEs"_str);
         return;
       }
       ctes.reserved[ctes.reserved_count++] = node(node(l).a).name;
     }
-    if (auto list = q.get(Slot::Ctes)) {
-      out("WITH ");
+    if (auto list = q.get(Slot::Ctes); list != 0_usize) {
+      out("WITH "_str);
       bool first = true;
-      for (; list; list = node(list).b) {
+      for (; list != 0_usize; list = node(list).b) {
         auto n = node(node(list).a);
-        for (unsigned i = 0; i < ctes.count; ++i)
+        for (usize i = 0_usize; i < ctes.count; ++i)
           if (same(n.name, ctes.names[i]))
             fail(ErrorKind::DuplicateName, id, text(n.name));
         if (!first)
-          out(", ");
+          out(", "_str);
         first = false;
         quote(n.name);
-        out(" AS ");
-        scalar_query(n.a, nullptr, &ctes, depth + 1, false);
-        if (ctes.count >= ctes.names.size()) {
-          fail(ErrorKind::Capacity, id, "CTEs");
+        out(" AS "_str);
+        scalar_query(n.a, nullptr, &ctes, depth + 1_usize, false);
+        if (ctes.count >= ctes.names.len()) {
+          fail(ErrorKind::Capacity, id, "CTEs"_str);
           return;
         }
         ctes.names[ctes.count++] = n.name;
       }
       out(' ');
     }
-    std::optional<ProjectionFacts> projection;
+    Option<ProjectionFacts> projection;
     if (preparing_ && q.kind == StatementKind::Select)
-      for (Id l = q.get(Slot::Projection); l; l = node(l).b)
+      for (Id l = q.get(Slot::Projection); l != 0_usize; l = node(l).b)
         if (node(node(l).a).kind == Kind::Alias) {
-          projection.emplace();
+          projection = Some(ProjectionFacts{});
           projection->list = q.get(Slot::Projection);
           break;
         }
     Scope scope{.parent = parent};
     if (projection)
       scope.projection = &*projection;
-    if (q.get(Slot::Source))
+    if (q.get(Slot::Source) != 0_usize)
       register_source(q.get(Slot::Source), scope);
-    for (Id l = q.get(Slot::Joins); l; l = node(l).b)
+    for (Id l = q.get(Slot::Joins); l != 0_usize; l = node(l).b)
       register_source(node(node(l).a).a, scope, node(node(l).a).flag);
     if (q.kind != StatementKind::Select)
       scope.write_target = q.get(Slot::Source);
     if (error_.kind != ErrorKind::None)
       return;
     if (q.kind == StatementKind::Select) {
-      out(q.distinct ? "SELECT DISTINCT " : "SELECT ");
+      out(q.distinct ? "SELECT DISTINCT "_str : "SELECT "_str);
       Scope projection_scope = scope;
       projection_scope.window_projection = true;
-      expressions(q.get(Slot::Projection), &projection_scope, &ctes, depth + 1,
+      expressions(q.get(Slot::Projection), &projection_scope, &ctes, depth + 1_usize,
                   Use::Projection, projection ? &*projection : nullptr);
-      if (q.get(Slot::Source)) {
-        out(" FROM ");
-        source(q.get(Slot::Source), &ctes, depth + 1);
+      if (q.get(Slot::Source) != 0_usize) {
+        out(" FROM "_str);
+        source(q.get(Slot::Source), &ctes, depth + 1_usize);
       }
       Scope join_scope{.parent = parent};
-      if (q.get(Slot::Source))
+      if (q.get(Slot::Source) != 0_usize)
         register_source(q.get(Slot::Source), join_scope);
-      for (Id l = q.get(Slot::Joins); l; l = node(l).b) {
+      for (Id l = q.get(Slot::Joins); l != 0_usize; l = node(l).b) {
         const auto &n = node(node(l).a);
         register_source(n.a, join_scope);
-        out(n.flag ? " LEFT JOIN " : " INNER JOIN ");
-        source(n.a, &ctes, depth + 1);
-        out(" ON ");
-        expression(n.b, &join_scope, &ctes, depth + 1);
-        if (n.flag && join_scope.count)
-          join_scope.sources[join_scope.count - 1].nullable = true;
+        out(n.flag ? " LEFT JOIN "_str : " INNER JOIN "_str);
+        source(n.a, &ctes, depth + 1_usize);
+        out(" ON "_str);
+        expression(n.b, &join_scope, &ctes, depth + 1_usize);
+        if (n.flag && join_scope.count != 0_usize)
+          join_scope.sources[usize(join_scope.count.to_primitive() - 1)].nullable = true;
       }
     } else if (q.kind == StatementKind::Insert) {
-      out("INSERT INTO ");
-      source(q.get(Slot::Source), &ctes, depth + 1);
+      out("INSERT INTO "_str);
+      source(q.get(Slot::Source), &ctes, depth + 1_usize);
       if (q.default_values) {
-        out(" DEFAULT VALUES");
+        out(" DEFAULT VALUES"_str);
       } else {
-        out(" (");
-        expressions(q.get(Slot::Projection), &scope, &ctes, depth + 1,
+        out(" ("_str);
+        expressions(q.get(Slot::Projection), &scope, &ctes, depth + 1_usize,
                     Use::Column);
-        out(") VALUES ");
+        out(") VALUES "_str);
         if (node(q.get(Slot::Values)).kind == Kind::ValuesGroups) {
           group_values(q.get(Slot::Values), q.get(Slot::Projection), &scope,
-                       depth + 1);
+                       depth + 1_usize);
         } else {
           out('(');
           Id column_list = q.get(Slot::Projection);
-          for (Id l = q.get(Slot::Values); l; l = node(l).b) {
+          for (Id l = q.get(Slot::Values); l != 0_usize; l = node(l).b) {
             if (l != q.get(Slot::Values))
-              out(", ");
-            auto value = expression(node(l).a, nullptr, &ctes, depth + 2);
+              out(", "_str);
+            auto value = expression(node(l).a, nullptr, &ctes, depth + 2_usize);
             if (preparing_)
               assignment(column(node(column_list).a, &scope, true), value,
                          node(l).a);
@@ -1178,73 +1192,73 @@ class Compiler {
           out(')');
         }
       }
-      if (q.get(Slot::Conflict)) {
-        out(" ON CONFLICT (");
-        expressions(q.get(Slot::Conflict), &scope, &ctes, depth + 1,
+      if (q.get(Slot::Conflict) != 0_usize) {
+        out(" ON CONFLICT ("_str);
+        expressions(q.get(Slot::Conflict), &scope, &ctes, depth + 1_usize,
                     Use::Column);
-        if (q.get(Slot::ConflictSets)) {
-          out(") DO UPDATE SET ");
+        if (q.get(Slot::ConflictSets) != 0_usize) {
+          out(") DO UPDATE SET "_str);
           Scope conflict_scope = scope;
           conflict_scope.conflict_update = true;
           expressions(q.get(Slot::ConflictSets), &conflict_scope, &ctes,
-                      depth + 1, Use::Assignment);
+                      depth + 1_usize, Use::Assignment);
         } else {
-          out(") DO NOTHING");
+          out(") DO NOTHING"_str);
         }
       }
     } else if (q.kind == StatementKind::Update) {
-      out("UPDATE ");
-      source(q.get(Slot::Source), &ctes, depth + 1);
-      out(" SET ");
-      expressions(q.get(Slot::Sets), &scope, &ctes, depth + 1, Use::Assignment);
+      out("UPDATE "_str);
+      source(q.get(Slot::Source), &ctes, depth + 1_usize);
+      out(" SET "_str);
+      expressions(q.get(Slot::Sets), &scope, &ctes, depth + 1_usize, Use::Assignment);
     } else {
-      out("DELETE FROM ");
-      source(q.get(Slot::Source), &ctes, depth + 1);
+      out("DELETE FROM "_str);
+      source(q.get(Slot::Source), &ctes, depth + 1_usize);
     }
-    if (q.get(Slot::Where)) {
-      out(" WHERE ");
-      expression(q.get(Slot::Where), &scope, &ctes, depth + 1);
+    if (q.get(Slot::Where) != 0_usize) {
+      out(" WHERE "_str);
+      expression(q.get(Slot::Where), &scope, &ctes, depth + 1_usize);
     }
-    if (q.get(Slot::Group)) {
-      out(" GROUP BY ");
-      expressions(q.get(Slot::Group), &scope, &ctes, depth + 1);
+    if (q.get(Slot::Group) != 0_usize) {
+      out(" GROUP BY "_str);
+      expressions(q.get(Slot::Group), &scope, &ctes, depth + 1_usize);
     }
-    if (q.get(Slot::Having)) {
-      out(" HAVING ");
-      expression(q.get(Slot::Having), &scope, &ctes, depth + 1);
+    if (q.get(Slot::Having) != 0_usize) {
+      out(" HAVING "_str);
+      expression(q.get(Slot::Having), &scope, &ctes, depth + 1_usize);
     }
-    if (q.get(Slot::Order)) {
-      out(" ORDER BY ");
+    if (q.get(Slot::Order) != 0_usize) {
+      out(" ORDER BY "_str);
       scope.ordering = true;
-      expressions(q.get(Slot::Order), &scope, &ctes, depth + 1, Use::Ordering);
+      expressions(q.get(Slot::Order), &scope, &ctes, depth + 1_usize, Use::Ordering);
     }
-    if (q.get(Slot::Returning)) {
-      out(" RETURNING ");
-      expressions(q.get(Slot::Returning), &scope, &ctes, depth + 1,
+    if (q.get(Slot::Returning) != 0_usize) {
+      out(" RETURNING "_str);
+      expressions(q.get(Slot::Returning), &scope, &ctes, depth + 1_usize,
                   Use::Column);
     }
-    if (q.get(Slot::Limit)) {
-      out(" LIMIT ");
-      expression(q.get(Slot::Limit), nullptr, &ctes, depth + 1);
+    if (q.get(Slot::Limit) != 0_usize) {
+      out(" LIMIT "_str);
+      expression(q.get(Slot::Limit), nullptr, &ctes, depth + 1_usize);
     }
-    if (q.get(Slot::Offset)) {
-      out(" OFFSET ");
-      expression(q.get(Slot::Offset), nullptr, &ctes, depth + 1);
+    if (q.get(Slot::Offset) != 0_usize) {
+      out(" OFFSET "_str);
+      expression(q.get(Slot::Offset), nullptr, &ctes, depth + 1_usize);
     }
   }
 
   void prepare_and_measure(Id id) {
-    query(id, nullptr, nullptr, 0);
+    query(id, nullptr, nullptr, 0_usize);
     if (error_.kind != ErrorKind::None)
       return;
     preparing_ = false;
     measuring_ = true;
-    fact_cursor_ = 0;
-    measured_sql_ = 0;
-    query(id, nullptr, nullptr, 0);
+    fact_cursor_ = 0_usize;
+    measured_sql_ = 0_usize;
+    query(id, nullptr, nullptr, 0_usize);
     measuring_ = false;
     if (error_.kind == ErrorKind::None && fact_cursor_ != prepared_.count)
-      fail(ErrorKind::InvalidShape, id, "expression uses");
+      fail(ErrorKind::InvalidShape, id, "expression uses"_str);
   }
 
 public:
@@ -1257,17 +1271,17 @@ public:
         expansion_limits_(limits) {}
   static auto run_expanded(Query value, ExpansionLimits limits)
       -> rstd::Result<ExpandedQuery, Error> {
-    if (!value.owner_ || !value.id_)
+    if (! value.owner_ || value.id_ == 0_usize)
       return rstd::Err(Error{.kind = ErrorKind::InvalidHandle});
     ExpandedQuery result;
     Compiler c(*value.owner_, result, limits);
     if (value.owner_->error_.kind != ErrorKind::None)
       return rstd::Err(Error(value.owner_->error_));
-    c.query(value.id_, nullptr, nullptr, 0);
+    c.query(value.id_, nullptr, nullptr, 0_usize);
     if (c.error_.kind != ErrorKind::None)
       return rstd::Err(Error(c.error_));
     c.preparing_ = false;
-    c.query(value.id_, nullptr, nullptr, 0);
+    c.query(value.id_, nullptr, nullptr, 0_usize);
     if (c.error_.kind != ErrorKind::None)
       return rstd::Err(Error(c.error_));
     auto valid = rstd::str_::from_utf8(result.sql().as_bytes());
@@ -1281,7 +1295,7 @@ public:
 
   static auto plan_expansion(Query value, ExpansionLimits ceiling)
       -> rstd::Result<ExpansionPlan, Error> {
-    if (!value.owner_ || !value.id_)
+    if (! value.owner_ || value.id_ == 0_usize)
       return rstd::Err(Error{.kind = ErrorKind::InvalidHandle});
     Compiler c(*value.owner_, ceiling);
     if (value.owner_->error_.kind != ErrorKind::None)
@@ -1289,12 +1303,12 @@ public:
     c.prepare_and_measure(value.id_);
     if (c.error_.kind != ErrorKind::None)
       return rstd::Err(Error(c.error_));
-    return rstd::Ok(ExpansionPlan{c.next_slot_ - 1, c.measured_sql_});
+    return rstd::Ok(ExpansionPlan{c.next_slot_ - 1_usize, c.measured_sql_});
   }
 
   static auto run_expanded_planned(Query value, ExpansionLimits ceiling)
       -> rstd::Result<ExpandedQuery, Error> {
-    if (!value.owner_ || !value.id_)
+    if (! value.owner_ || value.id_ == 0_usize)
       return rstd::Err(Error{.kind = ErrorKind::InvalidHandle});
     Compiler c(*value.owner_, ceiling);
     if (value.owner_->error_.kind != ErrorKind::None)
@@ -1302,18 +1316,18 @@ public:
     c.prepare_and_measure(value.id_);
     if (c.error_.kind != ErrorKind::None)
       return rstd::Err(Error(c.error_));
-    ExpansionPlan plan{c.next_slot_ - 1, c.measured_sql_};
+    ExpansionPlan plan{c.next_slot_ - 1_usize, c.measured_sql_};
     ExpandedQuery result;
     result.sql_.reserve(plan.sql);
     c.expanded_ = &result;
     c.expansion_limits_ = {plan.parameters, plan.sql};
-    c.fact_cursor_ = 0;
-    c.query(value.id_, nullptr, nullptr, 0);
+    c.fact_cursor_ = 0_usize;
+    c.query(value.id_, nullptr, nullptr, 0_usize);
     if (c.error_.kind != ErrorKind::None)
       return rstd::Err(Error(c.error_));
-    if (result.sql_.size() != plan.sql || c.next_slot_ - 1 != plan.parameters ||
+    if (result.sql_.len() != plan.sql || c.next_slot_ - 1_usize != plan.parameters ||
         c.fact_cursor_ != c.prepared_.count) {
-      c.fail(ErrorKind::InvalidShape, value.id_, "expansion plan");
+      c.fail(ErrorKind::InvalidShape, value.id_, "expansion plan"_str);
       return rstd::Err(Error(c.error_));
     }
     auto valid = rstd::str_::from_utf8(result.sql().as_bytes());
@@ -1326,16 +1340,16 @@ public:
   }
 
   static constexpr auto run(Query value) -> rstd::Result<CompiledQuery, Error> {
-    if (!value.owner_ || !value.id_)
+    if (! value.owner_ || value.id_ == 0_usize)
       return rstd::Err(Error{.kind = ErrorKind::InvalidHandle});
     Compiler c(*value.owner_);
     if (value.owner_->error_.kind != ErrorKind::None)
       return rstd::Err(Error(value.owner_->error_));
-    c.query(value.id_, nullptr, nullptr, 0);
+    c.query(value.id_, nullptr, nullptr, 0_usize);
     if (c.error_.kind != ErrorKind::None)
       return rstd::Err(Error(c.error_));
     c.preparing_ = false;
-    c.query(value.id_, nullptr, nullptr, 0);
+    c.query(value.id_, nullptr, nullptr, 0_usize);
     if (c.error_.kind != ErrorKind::None)
       return rstd::Err(Error(c.error_));
     auto valid = rstd::str_::from_utf8(c.result_.sql().as_bytes());
