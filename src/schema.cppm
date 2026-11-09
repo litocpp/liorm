@@ -210,12 +210,7 @@ class SchemaBuilder {
             fail(ErrorKind::Capacity, name);
             return {};
         }
-        array<rstd::byte, 8192> bytes {};
-        for (usize i {}; i < name.len(); ++i)
-            bytes[i] = rstd::byte { static_cast<unsigned char>(name[i].to_primitive()) };
-        if (rstd::str_::from_utf8(
-                rstd::slice<rstd::u8>::from_raw_parts(bytes.data(), rstd::usize(name.len())))
-                .is_err()) {
+        if (rstd::str_::from_utf8(name.as_bytes()).is_err()) {
             fail(ErrorKind::InvalidName, name);
             return {};
         }
