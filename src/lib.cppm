@@ -1,4 +1,5 @@
 export module liorm;
+export import :error;
 export import :value;
 export import :schema;
 export import :table;
