@@ -134,6 +134,7 @@ class Query {
 
 public:
     constexpr Query() = default;
+    // On UPDATE, FROM supplies a source without replacing the write target.
     constexpr auto from(Expr source) const -> Query;
     constexpr auto where(Expr condition) const -> Query;
     constexpr auto having(Expr condition) const -> Query;
@@ -258,12 +259,14 @@ enum class StatementKind
     Select,
     Insert,
     Update,
-    Delete
+    Delete,
+    Values
 };
 enum class Slot
 {
     Projection,
     Source,
+    UpdateFrom,
     Where,
     Group,
     Having,
@@ -825,6 +828,17 @@ public:
         const array<Expr, sizeof...(T)> values { args... };
         return select(values.as_slice());
     }
+    // A standalone VALUES query for CTEs and derived sources; SQLite names its
+    // output columns column1, column2, and so on. Requires runtime expansion.
+    constexpr auto values_groups(slice<ParameterGroup> columns) -> Query {
+        return add_query(QueryData { .kind = StatementKind::Values }).values_groups(columns);
+    }
+    template<class... T>
+        requires((rstd::mtp::same_as<T, ParameterGroup>) && ...)
+    constexpr auto values_groups(T... columns) -> Query {
+        const array<ParameterGroup, sizeof...(T)> groups { columns... };
+        return values_groups(groups.as_slice());
+    }
     constexpr auto insert_into(Expr table, slice<Expr> columns) -> Query {
         QueryData data { .kind = StatementKind::Insert };
         data.get(Slot::Source)     = check(table);
@@ -1028,7 +1042,11 @@ constexpr auto Expr::set(Expr value) const -> Expr {
                                    .b    = owner_->check(value) }));
 }
 constexpr auto Query::from(Expr x) const -> Query {
-    return owner_ ? owner_->change(*this, Slot::Source, owner_->check(x)) : Query {};
+    if (! owner_) return {};
+    auto slot = owner_->queries_[owner_->check(*this)].kind == StatementKind::Update
+                    ? Slot::UpdateFrom
+                    : Slot::Source;
+    return owner_->change(*this, slot, owner_->check(x));
 }
 constexpr auto Query::where(Expr x) const -> Query {
     return owner_ ? owner_->change(*this, Slot::Where, owner_->check(x)) : Query {};

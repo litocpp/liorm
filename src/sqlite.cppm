@@ -511,10 +511,12 @@ class Compiler {
     }
     constexpr void
     scalar_query(Id id, const Scope* scope, const CteScope* ctes, usize depth, bool one) {
-        const auto& q = builder_.queries_[id];
-        if (preparing_ && (q.kind != StatementKind::Select ||
-                           (one && (count(q.get(Slot::Projection)) != 1_usize ||
-                                    node(node(q.get(Slot::Projection)).a).kind == Kind::Star)))) {
+        const auto& q          = builder_.queries_[id];
+        bool        values     = q.kind == StatementKind::Values;
+        auto        projection = values ? node(q.get(Slot::Values)).a : q.get(Slot::Projection);
+        if (preparing_ && ((q.kind != StatementKind::Select && ! values) ||
+                           (one && (count(projection) != 1_usize ||
+                                    (! values && node(node(projection).a).kind == Kind::Star))))) {
             fail(ErrorKind::InvalidShape, id, "subquery projection"_str);
             return;
         }
@@ -932,9 +934,10 @@ class Compiler {
                 auto        group_id = node(l).a;
                 const auto& group    = node(group_id);
                 parameter(group_id, true);
-                assignment(column(node(columns).a, scope, true),
-                           Fact { FactKind::Known, group.type },
-                           group_id);
+                if (columns != 0_usize)
+                    assignment(column(node(columns).a, scope, true),
+                               Fact { FactKind::Known, group.type },
+                               group_id);
             }
             return;
         }
@@ -951,6 +954,23 @@ class Compiler {
             out(')');
         }
     }
+    constexpr void group_shape(Id values, Id id) {
+        if (values == 0_usize || node(values).kind != Kind::ValuesGroups ||
+            node(values).a == 0_usize) {
+            fail(ErrorKind::InvalidShape, id, "VALUES groups"_str);
+            return;
+        }
+        long long rows = 0;
+        for (Id l = node(values).a; l != 0_usize && error_.kind == ErrorKind::None; l = node(l).b) {
+            const auto& group = node(node(l).a);
+            if (group.kind != Kind::ParameterGroup || group.integer <= 0 ||
+                (rows && rows != group.integer)) {
+                fail(ErrorKind::InvalidShape, id, "VALUES groups"_str);
+                return;
+            }
+            rows = group.integer;
+        }
+    }
     constexpr void shape(const QueryData& q, Id id) {
         if (! preparing_) return;
         auto get = [&](Slot s) {
@@ -959,10 +979,19 @@ class Compiler {
         auto set = [&](Slot s) {
             return q.get(s) != 0_usize;
         };
-        if (q.kind == StatementKind::Select) {
+        if (q.kind == StatementKind::Values) {
+            for (usize i {}; i < usize(static_cast<rstd::size_t>(Slot::Count)); ++i)
+                if (i != usize(static_cast<rstd::size_t>(Slot::Values)) &&
+                    i != usize(static_cast<rstd::size_t>(Slot::Ctes)) && q.slots[i] != 0_usize)
+                    fail(ErrorKind::InvalidShape, id, "VALUES clauses"_str);
+            if (q.distinct || q.allow_all || q.default_values)
+                fail(ErrorKind::InvalidShape, id, "VALUES clauses"_str);
+            group_shape(get(Slot::Values), id);
+        } else if (q.kind == StatementKind::Select) {
             if (! set(Slot::Projection) || set(Slot::Values) || set(Slot::Sets) ||
-                set(Slot::Conflict) || set(Slot::ConflictSets) || set(Slot::Returning) ||
-                q.allow_all || q.default_values || (set(Slot::Joins) && ! set(Slot::Source)) ||
+                set(Slot::UpdateFrom) || set(Slot::Conflict) || set(Slot::ConflictSets) ||
+                set(Slot::Returning) || q.allow_all || q.default_values ||
+                (set(Slot::Joins) && ! set(Slot::Source)) ||
                 (set(Slot::Having) && ! set(Slot::Group)) ||
                 (set(Slot::Offset) && ! set(Slot::Limit)))
                 fail(ErrorKind::InvalidShape, id, "SELECT"_str);
@@ -972,6 +1001,8 @@ class Compiler {
                 set(Slot::Group) || set(Slot::Having) || set(Slot::Order) || set(Slot::Limit) ||
                 set(Slot::Offset) || set(Slot::Joins))
                 fail(ErrorKind::InvalidShape, id, "write clauses"_str);
+            if (q.kind != StatementKind::Update && set(Slot::UpdateFrom))
+                fail(ErrorKind::InvalidShape, id, "UPDATE FROM"_str);
             if (q.kind == StatementKind::Insert) {
                 auto values  = get(Slot::Values);
                 bool grouped = values != 0_usize && node(values).kind == Kind::ValuesGroups;
@@ -984,19 +1015,7 @@ class Compiler {
                     (get(Slot::ConflictSets) != 0_usize && get(Slot::Conflict) == 0_usize) ||
                     get(Slot::Where) != 0_usize || get(Slot::Sets) != 0_usize || q.allow_all)
                     fail(ErrorKind::InvalidShape, id, "INSERT"_str);
-                if (grouped) {
-                    long long rows = 0;
-                    for (Id l = inputs; l != 0_usize && error_.kind == ErrorKind::None;
-                         l    = node(l).b) {
-                        const auto& group = node(node(l).a);
-                        if (group.kind != Kind::ParameterGroup || group.integer <= 0 ||
-                            (rows && rows != group.integer)) {
-                            fail(ErrorKind::InvalidShape, id, "VALUES groups"_str);
-                            break;
-                        }
-                        rows = group.integer;
-                    }
-                }
+                if (grouped) group_shape(values, id);
                 unique_columns(get(Slot::Projection), false);
                 if (get(Slot::Conflict) != 0_usize) unique_columns(get(Slot::Conflict), false);
                 if (get(Slot::ConflictSets) != 0_usize)
@@ -1048,6 +1067,11 @@ class Compiler {
             }
             out(' ');
         }
+        if (q.kind == StatementKind::Values) {
+            out("VALUES "_str);
+            group_values(q.get(Slot::Values), 0_usize, nullptr, depth + 1_usize);
+            return;
+        }
         Option<ProjectionFacts> projection;
         if (preparing_ && q.kind == StatementKind::Select)
             for (Id l = q.get(Slot::Projection); l != 0_usize; l = node(l).b)
@@ -1059,6 +1083,7 @@ class Compiler {
         Scope scope { .parent = parent };
         if (projection) scope.projection = &*projection;
         if (q.get(Slot::Source) != 0_usize) register_source(q.get(Slot::Source), scope);
+        if (q.get(Slot::UpdateFrom) != 0_usize) register_source(q.get(Slot::UpdateFrom), scope);
         for (Id l = q.get(Slot::Joins); l != 0_usize; l = node(l).b)
             register_source(node(node(l).a).a, scope, node(node(l).a).flag);
         if (q.kind != StatementKind::Select) scope.write_target = q.get(Slot::Source);
@@ -1135,6 +1160,10 @@ class Compiler {
             source(q.get(Slot::Source), &ctes, depth + 1_usize);
             out(" SET "_str);
             expressions(q.get(Slot::Sets), &scope, &ctes, depth + 1_usize, Use::Assignment);
+            if (q.get(Slot::UpdateFrom) != 0_usize) {
+                out(" FROM "_str);
+                source(q.get(Slot::UpdateFrom), &ctes, depth + 1_usize);
+            }
         } else {
             out("DELETE FROM "_str);
             source(q.get(Slot::Source), &ctes, depth + 1_usize);
