@@ -88,7 +88,8 @@ enum class Binary
     Divide,
     And,
     Or,
-    Like
+    Like,
+    Match
 };
 class QueryBuilder;
 class Query;
@@ -118,6 +119,7 @@ public:
     constexpr auto is_null() const -> Expr;
     constexpr auto is_not_null() const -> Expr;
     constexpr auto like(Expr other) const -> Expr;
+    constexpr auto match(Expr other) const -> Expr;
     constexpr auto in(slice<Expr> values) const -> Expr;
     constexpr auto in(Query query) const -> Expr;
     constexpr auto in(ParameterGroup values) const -> Expr;
@@ -141,6 +143,7 @@ public:
     constexpr auto limit(Expr value) const -> Query;
     constexpr auto offset(Expr value) const -> Query;
     constexpr auto distinct() const -> Query;
+    constexpr auto or_replace() const -> Query;
     constexpr auto allow_all() const -> Query;
     constexpr auto join(Expr source, Expr on) const -> Query;
     constexpr auto left_join(Expr source, Expr on) const -> Query;
@@ -285,8 +288,8 @@ enum class Slot
 struct QueryData {
     StatementKind                                     kind {};
     array<Id, static_cast<rstd::size_t>(Slot::Count)> slots {};
-    bool                                              distinct {}, allow_all {}, default_values {};
-    constexpr auto                                    get(Slot slot) const -> Id {
+    bool           distinct {}, allow_all {}, default_values {}, or_replace {};
+    constexpr auto get(Slot slot) const -> Id {
         return slots[usize(static_cast<rstd::size_t>(slot))];
     }
     constexpr auto get(Slot slot) -> Id& { return slots[usize(static_cast<rstd::size_t>(slot))]; }
@@ -1009,6 +1012,9 @@ constexpr auto Expr::desc() const -> Expr {
 constexpr auto Expr::like(Expr other) const -> Expr {
     return binary(Binary::Like, other);
 }
+constexpr auto Expr::match(Expr other) const -> Expr {
+    return binary(Binary::Match, other);
+}
 constexpr auto Expr::as(ref<str> name) const -> Expr {
     if (! owner_) return {};
     return Expr(owner_,
@@ -1116,6 +1122,15 @@ constexpr auto Query::allow_all() const -> Query {
     if (! owner_) return {};
     auto data      = owner_->queries_[owner_->check(*this)];
     data.allow_all = true;
+    return owner_->add_query(data);
+}
+constexpr auto Query::or_replace() const -> Query {
+    if (! owner_) return {};
+    auto data = owner_->queries_[owner_->check(*this)];
+    if (data.kind != StatementKind::Insert)
+        owner_->fail(ErrorKind::InvalidShape, id_, "INSERT OR REPLACE"_str);
+    if (data.or_replace) owner_->fail(ErrorKind::DuplicateClause, id_, "OR REPLACE"_str);
+    data.or_replace = true;
     return owner_->add_query(data);
 }
 constexpr auto Query::join(Expr source, Expr on) const -> Query {

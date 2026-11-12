@@ -8,6 +8,18 @@ import rstd;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
+export namespace liorm
+{
+template<>
+struct ValueTraits<u64> : ValueTraits<i64> {};
+template<>
+struct ValueTraits<Vec<u8>> : ValueTraits<BlobParameter> {};
+template<>
+struct ValueTraits<slice<u8>> : ValueTraits<BlobParameter> {};
+template<>
+struct ValueTraits<ref<str>> : ValueTraits<TextParameter> {};
+} // namespace liorm
+
 export namespace liorm::sqlito
 {
 using namespace rstd::prelude;
@@ -49,6 +61,29 @@ struct Codec<i64> {
     static auto write(::sqlito::Statement& statement, usize slot, i64 value)
         -> Result<empty, ::sqlito::Error> {
         return statement.bind(slot, value);
+    }
+};
+
+template<>
+struct Codec<u64> {
+    static constexpr auto parameter_type() -> query::ParameterType {
+        return ValueTraits<u64>::type;
+    }
+    static auto read(::sqlito::Statement& statement, usize column) -> Result<u64, ::sqlito::Error> {
+        auto value = rstd_try(Codec<i64>::read(statement, column));
+        return rstd::try_into<u64>(value).map_err([](auto) {
+            return ::sqlito::Error::from(
+                ::sqlito::ErrorKind::Range, 0, String::make("integer is out of range for u64"_str));
+        });
+    }
+    static auto write(::sqlito::Statement& statement, usize slot, u64 value)
+        -> Result<empty, ::sqlito::Error> {
+        auto integer = rstd_try(rstd::try_into<i64>(value).map_err([](auto) {
+            return ::sqlito::Error::from(::sqlito::ErrorKind::Range,
+                                         0,
+                                         String::make("u64 exceeds SQLite integer range"_str));
+        }));
+        return Codec<i64>::write(statement, slot, integer);
     }
 };
 
@@ -116,6 +151,45 @@ struct Codec<String> {
     static auto write(::sqlito::Statement& statement, usize slot, const String& value)
         -> Result<empty, ::sqlito::Error> {
         return statement.bind_text(slot, value.as_str());
+    }
+};
+
+template<>
+struct Codec<ref<str>> {
+    static constexpr auto parameter_type() -> query::ParameterType {
+        return ValueTraits<ref<str>>::type;
+    }
+    static auto write(::sqlito::Statement& statement, usize slot, ref<str> value)
+        -> Result<empty, ::sqlito::Error> {
+        return statement.bind_text(slot, value);
+    }
+};
+
+template<>
+struct Codec<slice<u8>> {
+    static constexpr auto parameter_type() -> query::ParameterType {
+        return ValueTraits<slice<u8>>::type;
+    }
+    static auto write(::sqlito::Statement& statement, usize slot, slice<u8> value)
+        -> Result<empty, ::sqlito::Error> {
+        return statement.bind_blob(slot, value);
+    }
+};
+
+template<>
+struct Codec<Vec<u8>> {
+    static constexpr auto parameter_type() -> query::ParameterType {
+        return ValueTraits<Vec<u8>>::type;
+    }
+    static auto read(::sqlito::Statement& statement, usize column)
+        -> Result<Vec<u8>, ::sqlito::Error> {
+        auto value = rstd_try(statement.blob(column));
+        if (value.is_none()) return Err(invalid_column());
+        return Ok(rstd::move(value).unwrap());
+    }
+    static auto write(::sqlito::Statement& statement, usize slot, const Vec<u8>& value)
+        -> Result<empty, ::sqlito::Error> {
+        return Codec<slice<u8>>::write(statement, slot, value.as_slice());
     }
 };
 
@@ -386,6 +460,23 @@ auto scalar(Prepared& statement, usize column = usize()) -> Result<T, ::sqlito::
         return Err(::sqlito::Error::from(
             ::sqlito::ErrorKind::Range, 0, String::make("expected exactly one row"_str)));
     return Ok(rstd::move(result));
+}
+
+template<class T, class Prepared>
+    requires requires(::sqlito::Statement& statement, usize column) {
+        Codec<T>::read(statement, column);
+    }
+auto optional_scalar(Prepared& statement, usize column = usize())
+    -> Result<Option<T>, ::sqlito::Error> {
+    if (rstd_try(statement.step()) == ::sqlito::Step::Done) return Ok<Option<T>>(None());
+    auto reader = statement.reader();
+    auto result = rstd_try(reader.template read<T>(column));
+    bool extra  = false;
+    while (rstd_try(statement.step()) == ::sqlito::Step::Row) extra = true;
+    if (extra)
+        return Err(::sqlito::Error::from(
+            ::sqlito::ErrorKind::Range, 0, String::make("expected at most one row"_str)));
+    return Ok(Some(rstd::move(result)));
 }
 
 // Return the first model, or None, while still consuming subsequent rows and

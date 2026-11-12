@@ -608,10 +608,10 @@ class Compiler {
             parameter(id);
             break;
         case Kind::Binary: {
-            constexpr array<ref<str>, 13> ops { " = "_str,   " <> "_str, " < "_str,   " <= "_str,
-                                                " > "_str,   " >= "_str, " + "_str,   " - "_str,
-                                                " * "_str,   " / "_str,  " AND "_str, " OR "_str,
-                                                " LIKE "_str };
+            constexpr array<ref<str>, 14> ops { " = "_str,    " <> "_str,   " < "_str,   " <= "_str,
+                                                " > "_str,    " >= "_str,   " + "_str,   " - "_str,
+                                                " * "_str,    " / "_str,    " AND "_str, " OR "_str,
+                                                " LIKE "_str, " MATCH "_str };
             if (n.operation >= ops.len()) {
                 fail(ErrorKind::InvalidShape, id, "operator"_str);
                 return {};
@@ -625,10 +625,12 @@ class Compiler {
                 if (op <= Binary::GreaterEqual) {
                     compatible(a, b, id);
                     fact = boolean(a, b);
-                } else if (op == Binary::Like) {
+                } else if (op == Binary::Like || op == Binary::Match) {
                     if ((a.kind == FactKind::Known && a.type.kind != ValueKind::Text) ||
                         (b.kind == FactKind::Known && b.type.kind != ValueKind::Text))
-                        fail(ErrorKind::TypeMismatch, id, "LIKE"_str);
+                        fail(ErrorKind::TypeMismatch,
+                             id,
+                             op == Binary::Like ? "LIKE"_str : "MATCH"_str);
                     fact = boolean(a, b);
                 } else if (op >= Binary::And)
                     fact = boolean(a, b);
@@ -766,8 +768,11 @@ class Compiler {
                                                   "UPPER"_str, "LENGTH"_str, "COALESCE"_str,
                                                   "ABS"_str,   "RANDOM"_str };
             usize                         arity = count(n.a);
+            bool extremum = n.operation == usize(static_cast<rstd::size_t>(Function::Min)) ||
+                            n.operation == usize(static_cast<rstd::size_t>(Function::Max));
             if (n.operation >= names.len() ||
-                (n.operation == usize(static_cast<rstd::size_t>(Function::Coalesce))
+                (extremum ? arity == 0_usize
+                 : n.operation == usize(static_cast<rstd::size_t>(Function::Coalesce))
                      ? arity < 2_usize
                  : n.operation == usize(static_cast<rstd::size_t>(Function::Random))
                      ? arity != 0_usize
@@ -799,13 +804,23 @@ class Compiler {
                 bool first = true;
                 Fact argument;
                 bool coalesce_known = true, coalesce_nonnull = false;
-                bool only_null = true;
+                bool only_null       = true;
+                bool scalar_extremum = extremum && arity > 1_usize;
+                bool extremum_known = true, extremum_nullable = false, extremum_null = false;
                 for (Id l = n.a; l != 0_usize; l = node(l).b) {
                     if (! first) out(", "_str);
                     auto v = expression(node(l).a, argument_scope, ctes, depth + 2_usize);
                     if (first) argument = v;
-                    if (Function(static_cast<int>(n.operation.to_primitive())) ==
-                        Function::Coalesce) {
+                    if (scalar_extremum) {
+                        extremum_nullable = extremum_nullable || nullable(v);
+                        extremum_null     = extremum_null || v.kind == FactKind::NullLiteral;
+                        if (v.kind != FactKind::Known || argument.kind != FactKind::Known ||
+                            ! comparable(argument.type.kind, v.type.kind))
+                            extremum_known = false;
+                        else if (argument.type.kind == ValueKind::Integer &&
+                                 v.type.kind == ValueKind::Real)
+                            argument.type.kind = ValueKind::Real;
+                    } else if (f == Function::Coalesce) {
                         if (v.kind == FactKind::Unknown) coalesce_known = false;
                         if (v.kind == FactKind::Known) {
                             if (! v.type.nullable) coalesce_nonnull = true;
@@ -830,8 +845,15 @@ class Compiler {
                         fact.type.nullable = ! coalesce_nonnull;
                     }
                 } else if (f == Function::Min || f == Function::Max) {
-                    fact               = argument;
-                    fact.type.nullable = true;
+                    if (! scalar_extremum) {
+                        fact               = argument;
+                        fact.type.nullable = true;
+                    } else if (extremum_null)
+                        fact = { FactKind::NullLiteral, {} };
+                    else if (extremum_known) {
+                        fact               = argument;
+                        fact.type.nullable = extremum_nullable;
+                    }
                 } else if (f == Function::Lower || f == Function::Upper) {
                     if (argument.kind == FactKind::Known && argument.type.kind == ValueKind::Text)
                         fact = argument;
@@ -973,6 +995,8 @@ class Compiler {
     }
     constexpr void shape(const QueryData& q, Id id) {
         if (! preparing_) return;
+        if (q.or_replace && q.kind != StatementKind::Insert)
+            fail(ErrorKind::InvalidShape, id, "INSERT OR REPLACE"_str);
         auto get = [&](Slot s) {
             return q.get(s);
         };
@@ -1115,7 +1139,7 @@ class Compiler {
                     join_scope.sources[usize(join_scope.count.to_primitive() - 1)].nullable = true;
             }
         } else if (q.kind == StatementKind::Insert) {
-            out("INSERT INTO "_str);
+            out(q.or_replace ? "INSERT OR REPLACE INTO "_str : "INSERT INTO "_str);
             source(q.get(Slot::Source), &ctes, depth + 1_usize);
             if (q.default_values) {
                 out(" DEFAULT VALUES"_str);
