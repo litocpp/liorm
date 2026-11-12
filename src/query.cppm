@@ -71,7 +71,8 @@ enum class Function
     Upper,
     Length,
     Coalesce,
-    Abs
+    Abs,
+    Random
 };
 enum class Binary
 {

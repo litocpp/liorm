@@ -759,14 +759,16 @@ class Compiler {
             break;
         }
         case Kind::Function: {
-            constexpr array<ref<str>, 10> names { "COUNT"_str, "SUM"_str,    "AVG"_str,
+            constexpr array<ref<str>, 11> names { "COUNT"_str, "SUM"_str,    "AVG"_str,
                                                   "MIN"_str,   "MAX"_str,    "LOWER"_str,
                                                   "UPPER"_str, "LENGTH"_str, "COALESCE"_str,
-                                                  "ABS"_str };
+                                                  "ABS"_str,   "RANDOM"_str };
             usize                         arity = count(n.a);
             if (n.operation >= names.len() ||
                 (n.operation == usize(static_cast<rstd::size_t>(Function::Coalesce))
                      ? arity < 2_usize
+                 : n.operation == usize(static_cast<rstd::size_t>(Function::Random))
+                     ? arity != 0_usize
                      : arity != 1_usize)) {
                 fail(ErrorKind::InvalidShape, id, "function arity"_str);
                 return {};
@@ -818,7 +820,7 @@ class Compiler {
                     }
                     first = false;
                 }
-                if (f == Function::Count)
+                if (f == Function::Count || f == Function::Random)
                     fact = { FactKind::Known, { ValueKind::Integer, false } };
                 else if (f == Function::Coalesce) {
                     if (coalesce_known) {
