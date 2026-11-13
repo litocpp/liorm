@@ -6,6 +6,7 @@ export import :table;
 export import :active;
 export import :query;
 export import :row;
+export import :projection;
 export import :sqlite;
 export import :bind;
 export import :write;

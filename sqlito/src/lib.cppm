@@ -433,8 +433,8 @@ auto prepare(Session& session, Query query) -> Result<PreparedQuery<Query>, ::sq
     return PreparedQuery<Query>::create(session, rstd::move(query));
 }
 
-// Terminals consume through Done before reporting success. They never finish
-// the caller's transaction. A failure leaves recovery/reset to the caller.
+// Terminals never finish the caller's transaction. A failure leaves
+// recovery/reset to the caller.
 template<class Prepared>
 auto discard(Prepared& statement) -> Result<empty, ::sqlito::Error> {
     while (rstd_try(statement.step()) == ::sqlito::Step::Row) {
@@ -442,23 +442,45 @@ auto discard(Prepared& statement) -> Result<empty, ::sqlito::Error> {
     return Ok(empty {});
 }
 
-// Scalar queries require exactly one row. Decode errors retain their original
-// kind; zero or multiple rows are a Range error. Extra rows are fully drained.
+enum class RowConsumption
+{
+    Exact,
+    First,
+    Drain
+};
+} // namespace liorm::sqlito
+
+namespace liorm::sqlito
+{
+template<class Prepared>
+auto finish_row(Prepared& statement, RowConsumption consumption, ref<str> cardinality)
+    -> Result<empty, ::sqlito::Error> {
+    if (consumption == RowConsumption::First) return Ok(empty {});
+    bool extra = false;
+    while (rstd_try(statement.step()) == ::sqlito::Step::Row) extra = true;
+    if (extra && consumption == RowConsumption::Exact)
+        return Err(::sqlito::Error::from(::sqlito::ErrorKind::Range, 0, String::make(cardinality)));
+    return Ok(empty {});
+}
+} // namespace liorm::sqlito
+
+// Exact preserves strict cardinality. First leaves later rows untouched;
+// Drain consumes them without decoding or rejecting additional rows.
+export namespace liorm::sqlito
+{
 template<class T, class Prepared>
     requires requires(::sqlito::Statement& statement, usize column) {
         Codec<T>::read(statement, column);
     }
-auto scalar(Prepared& statement, usize column = usize()) -> Result<T, ::sqlito::Error> {
+auto scalar(Prepared&      statement,
+            usize          column      = usize(),
+            RowConsumption consumption = RowConsumption::Exact) -> Result<T, ::sqlito::Error> {
     if (rstd_try(statement.step()) == ::sqlito::Step::Done)
         return Err(::sqlito::Error::from(
             ::sqlito::ErrorKind::Range, 0, String::make("expected exactly one row"_str)));
     auto reader = statement.reader();
     auto result = rstd_try(reader.template read<T>(column));
-    bool extra  = false;
-    while (rstd_try(statement.step()) == ::sqlito::Step::Row) extra = true;
-    if (extra)
-        return Err(::sqlito::Error::from(
-            ::sqlito::ErrorKind::Range, 0, String::make("expected exactly one row"_str)));
+    rstd_try(finish_row(statement, consumption, "expected exactly one row"_str));
     return Ok(rstd::move(result));
 }
 
@@ -466,17 +488,39 @@ template<class T, class Prepared>
     requires requires(::sqlito::Statement& statement, usize column) {
         Codec<T>::read(statement, column);
     }
-auto optional_scalar(Prepared& statement, usize column = usize())
+auto optional_scalar(Prepared&      statement,
+                     usize          column      = usize(),
+                     RowConsumption consumption = RowConsumption::Exact)
     -> Result<Option<T>, ::sqlito::Error> {
     if (rstd_try(statement.step()) == ::sqlito::Step::Done) return Ok<Option<T>>(None());
     auto reader = statement.reader();
     auto result = rstd_try(reader.template read<T>(column));
-    bool extra  = false;
-    while (rstd_try(statement.step()) == ::sqlito::Step::Row) extra = true;
-    if (extra)
-        return Err(::sqlito::Error::from(
-            ::sqlito::ErrorKind::Range, 0, String::make("expected at most one row"_str)));
+    rstd_try(finish_row(statement, consumption, "expected at most one row"_str));
     return Ok(Some(rstd::move(result)));
+}
+
+template<class Prepared, class Projection>
+auto one_row(Prepared&         statement,
+             const Projection& projection,
+             RowConsumption    consumption = RowConsumption::Drain)
+    -> Result<Option<typename Projection::value_type>, ::sqlito::Error> {
+    using Row = typename Projection::value_type;
+    if (rstd_try(statement.step()) == ::sqlito::Step::Done) return Ok<Option<Row>>(None());
+    auto reader = statement.reader();
+    auto result = rstd_try(projection.decode(reader));
+    rstd_try(finish_row(statement, consumption, "expected at most one row"_str));
+    return Ok(Some(rstd::move(result)));
+}
+
+template<class Prepared, class Projection>
+auto all_rows(Prepared& statement, const Projection& projection)
+    -> Result<Vec<typename Projection::value_type>, ::sqlito::Error> {
+    Vec<typename Projection::value_type> result;
+    while (rstd_try(statement.step()) == ::sqlito::Step::Row) {
+        auto reader = statement.reader();
+        result.push(rstd_try(projection.decode(reader)));
+    }
+    return Ok(rstd::move(result));
 }
 
 // Return the first model, or None, while still consuming subsequent rows and
