@@ -617,6 +617,7 @@ auto prepare_page(Session& session, query::PageQuery query) -> Result<PreparedPa
 
 class ActiveWriteError {
     RSTD_ENUM(ActiveWriteError,
+              (Planning, (liorm::WriteError error;)),
               (Storage, (::sqlito::Error error;)),
               (Binding, (liorm::BindError<::sqlito::Error> error;)),
               (NotFound),
@@ -711,5 +712,85 @@ auto execute(Session& session, liorm::WriteCommand<Policy, Model> command, Facto
         if (next.unwrap() == ::sqlito::Step::Done) break;
     }
     return Ok(rstd::move(result));
+}
+} // namespace liorm::sqlito
+
+namespace liorm::sqlito
+{
+template<class Session, class Model, class Policy, class Factory>
+concept ExecutableWrite =
+    requires(Session& session, liorm::WriteCommand<Policy, Model> command, Factory factory) {
+        execute(session, rstd::move(command), rstd::move(factory));
+    };
+
+template<class Session, class Model, class Policy, class Factory>
+auto execute_planned(Session&                                                      session,
+                     Result<liorm::WriteCommand<Policy, Model>, liorm::WriteError> command,
+                     Factory factory) -> Result<Model, ActiveWriteError> {
+    if (command.is_err()) return Err(ActiveWriteError::Planning(rstd::move(command).unwrap_err()));
+    return execute(session, rstd::move(command).unwrap(), rstd::move(factory));
+}
+} // namespace liorm::sqlito
+
+export namespace liorm::sqlito
+{
+template<const liorm::schema::Schema& Tables,
+         class Policy = Writer,
+         class Session,
+         class Model,
+         class Factory = liorm::DefaultModelFactory<Model>>
+    requires ExecutableWrite<Session, Model, Policy, Factory>
+auto insert(Session& session, liorm::InsertValues<Model> values, Factory factory = {})
+    -> Result<Model, ActiveWriteError> {
+    return execute_planned(
+        session,
+        liorm::try_cached_insert<Tables, Policy>(rstd::move(values).into_active()),
+        rstd::move(factory));
+}
+
+template<const liorm::schema::Schema& Tables,
+         class Policy = Writer,
+         class Session,
+         class KeyValue,
+         class Model,
+         class Factory = liorm::DefaultModelFactory<Model>>
+    requires ExecutableWrite<Session, Model, Policy, Factory> &&
+             rstd::mtp::init<liorm::Key<Model>, KeyValue>
+auto update(Session& session, KeyValue&& key, liorm::Changeset<Model> changes, Factory factory = {})
+    -> Result<Model, ActiveWriteError> {
+    auto values =
+        liorm::update_values(liorm::Key<Model>(rstd::forward<KeyValue>(key)), rstd::move(changes));
+    return execute_planned(
+        session, liorm::try_cached_update<Tables, Policy>(rstd::move(values)), rstd::move(factory));
+}
+
+template<const liorm::schema::Schema& Tables,
+         class Policy = Writer,
+         class Session,
+         class Model,
+         class Factory = liorm::DefaultModelFactory<Model>>
+    requires requires { liorm_table_definition(static_cast<Model*>(nullptr)); } &&
+             ExecutableWrite<Session, Model, Policy, Factory>
+auto insert_all(Session& session, Model model, Factory factory = {})
+    -> Result<Model, ActiveWriteError> {
+    auto values = liorm::ActiveModel<Model>::from_model(rstd::move(model));
+    values.reset_all();
+    return execute_planned(
+        session, liorm::try_cached_insert<Tables, Policy>(rstd::move(values)), rstd::move(factory));
+}
+
+template<const liorm::schema::Schema& Tables,
+         class Policy = Writer,
+         class Session,
+         class Model,
+         class Factory = liorm::DefaultModelFactory<Model>>
+    requires requires { liorm_table_definition(static_cast<Model*>(nullptr)); } &&
+             ExecutableWrite<Session, Model, Policy, Factory>
+auto update_all(Session& session, Model model, Factory factory = {})
+    -> Result<Model, ActiveWriteError> {
+    auto values = liorm::ActiveModel<Model>::from_model(rstd::move(model));
+    values.reset_all();
+    return execute_planned(
+        session, liorm::try_cached_update<Tables, Policy>(rstd::move(values)), rstd::move(factory));
 }
 } // namespace liorm::sqlito

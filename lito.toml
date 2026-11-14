@@ -12,6 +12,99 @@ archive = "liorm"
 name = "liorm-tests"
 sources = ["tests/main.cpp", "tests/schema_model.cppm", "tests/query.cpp", "tests/sqlite.cpp", "tests/schema.cpp", "tests/schema_query.cpp", "tests/schema_sqlite.cpp", "tests/groups.cpp", "tests/bulk.cpp", "tests/window.cpp", "tests/named_bind.cpp", "tests/expansion_plan.cpp", "tests/pagination.cpp", "tests/rows.cpp", "tests/active.cpp", "tests/active_write.cpp"]
 
+[[test]]
+name = "liorm-changeset-tests"
+sources = ["tests/main.cpp", "tests/changeset.cpp"]
+
+[[compile-test.cases]]
+name = "Changeset.Valid"
+source = "tests/changeset/compile/valid.cpp"
+outcome = "success"
+
+[[compile-test.cases]]
+name = "Changeset.Duplicate"
+source = "tests/changeset/compile/duplicate.cpp"
+outcome = "failure"
+diagnostic-contains = ["duplicate write assignment"]
+
+[[compile-test.cases]]
+name = "Changeset.DuplicateInsert"
+source = "tests/changeset/compile/duplicate_insert.cpp"
+outcome = "failure"
+diagnostic-contains = ["duplicate write assignment"]
+
+[[compile-test.cases]]
+name = "Changeset.WrongModel"
+source = "tests/changeset/compile/wrong_model.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching constructor", "Changeset"]
+
+[[compile-test.cases]]
+name = "Changeset.PrimaryAssignment"
+source = "tests/changeset/compile/primary_assignment.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching constructor", "Changeset"]
+
+[[compile-test.cases]]
+name = "Changeset.WrongValue"
+source = "tests/changeset/compile/wrong_value.cpp"
+outcome = "failure"
+diagnostic-contains = ["no viable overloaded '='"]
+
+[[compile-test.cases]]
+name = "Changeset.WrongSetValue"
+source = "tests/changeset/compile/wrong_set_value.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching member function for call to 'set'"]
+
+[[compile-test.cases]]
+name = "Changeset.Unregistered"
+source = "tests/changeset/compile/unregistered.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching constructor", "InsertValues"]
+
+[[compile-test.cases]]
+name = "Changeset.IncompleteKey"
+source = "tests/changeset/compile/incomplete_key.cpp"
+outcome = "failure"
+diagnostic-contains = ["incomplete primary key"]
+
+[[compile-test.cases]]
+name = "Changeset.EmptyKey"
+source = "tests/changeset/compile/empty_key.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching constructor", "Key"]
+
+[[compile-test.cases]]
+name = "Changeset.ScalarCompoundKey"
+source = "tests/changeset/compile/scalar_compound_key.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching constructor", "Key"]
+
+[[compile-test.cases]]
+name = "Changeset.NonprimaryKey"
+source = "tests/changeset/compile/nonprimary_key.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching constructor", "Key"]
+
+[[compile-test.cases]]
+name = "Changeset.DuplicateKey"
+source = "tests/changeset/compile/duplicate_key.cpp"
+outcome = "failure"
+diagnostic-contains = ["duplicate write assignment"]
+
+[[compile-test.cases]]
+name = "Changeset.TemporaryBorrow"
+source = "tests/changeset/compile/temporary_borrow.cpp"
+outcome = "failure"
+diagnostic-contains = ["call to deleted member function 'value'"]
+
+[[compile-test.cases]]
+name = "Changeset.ReadonlyValue"
+source = "tests/changeset/compile/readonly_value.cpp"
+outcome = "failure"
+diagnostic-contains = ["no viable overloaded '='", "const"]
+
 [profile.base]
 exceptions = false
 rtti = false

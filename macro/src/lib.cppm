@@ -118,6 +118,16 @@ auto fold(std::string_view value) -> std::string {
         if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
     return result;
 }
+
+auto columns_type_name(std::string_view name) -> std::string {
+    constexpr std::string_view digits = "0123456789abcdef";
+    auto                       result = "liorm_columns_" + std::to_string(name.size()) + '_';
+    for (unsigned char c : name) {
+        result += digits[c >> 4];
+        result += digits[c & 15];
+    }
+    return result;
+}
 } // namespace
 
 [[pmacro::define("liorm")]]
@@ -141,6 +151,17 @@ auto table(pmacro::DeriveInput input, pmacro::Context& context) noexcept -> Outp
                     declaration.source,
                     input.item_span,
                     "liorm table requires a non-template record without bases");
+    for (const auto& token : input.item) {
+        if (token.kind() == pmacro::TokenKind::Group &&
+            token.delimiter() == pmacro::Delimiter::Brace)
+            break;
+        if (token.kind() == pmacro::TokenKind::Punct &&
+            (token.spelling() == ":" || token.spelling() == "::"))
+            return fail(context,
+                        declaration.source,
+                        input.item_span,
+                        "liorm table must be defined in its owning namespace");
+    }
     auto config = parse_options(context, declaration.helpers, true);
     if (! config) return fail(context, declaration.source, input.item_span, config.error());
     if (! config->name || ! config->primary_key)
@@ -153,9 +174,11 @@ auto table(pmacro::DeriveInput input, pmacro::Context& context) noexcept -> Outp
 
     const auto& qualified = *declaration.name;
     auto        source    = std::string();
+    auto        columns   = std::string();
     auto definition = "::liorm::schema::TableDefinition<" + qualified + ',' + quote(*config->name) +
                       ',' + quote(*config->primary_key);
     std::set<std::string> names;
+    std::set<std::string> members;
     std::size_t           primary_count = 0;
     for (const auto& field : record->fields) {
         if (! field.name || field.kind != pmacro::FieldKind::Named ||
@@ -165,6 +188,12 @@ auto table(pmacro::DeriveInput input, pmacro::Context& context) noexcept -> Outp
                         field.source,
                         input.item_span,
                         "liorm table requires public named non-bitfield members");
+        if (*field.name == qualified)
+            return fail(context,
+                        field.source,
+                        input.item_span,
+                        "liorm column member name conflicts with model type name");
+        members.insert(*field.name);
         auto options = parse_options(context, field.helpers, false);
         if (! options) return fail(context, field.source, input.item_span, options.error());
         if (! options->storage)
@@ -184,14 +213,25 @@ auto table(pmacro::DeriveInput input, pmacro::Context& context) noexcept -> Outp
                       quote(name) + ",::liorm::ValueKind::" + *options->storage + ',' +
                       (options->nullable ? "true" : "false") + ',' +
                       (options->primary ? "true" : "false") + '>';
+        columns += "static constexpr ::liorm::Column<&" + qualified + "::" + *field.name + "> " +
+                   *field.name + "{};";
     }
     if (primary_count == 0)
         return fail(
             context, declaration.source, input.item_span, "liorm table requires a primary field");
+    auto       columns_name = columns_type_name(qualified);
+    const auto columns_base = columns_name;
+    for (std::size_t suffix = 0; members.contains(columns_name); ++suffix)
+        columns_name = columns_base + '_' + std::to_string(suffix);
     source += "extern \"C++\" {";
-    if (declaration.after_item_export == pmacro::AfterItemExport::Required) source += "export ";
+    if (declaration.after_item_export == pmacro::AfterItemExport::Required) source += "export {";
+    source += "struct " + columns_name + "{" + columns + "};";
     source += "constexpr auto liorm_table_definition(" + qualified + "*) { return " + definition +
-              ">{ }; }}";
+              ">{ }; }";
+    source += "constexpr auto liorm_columns_definition(" + qualified + "*) { return " +
+              columns_name + "{}; }";
+    if (declaration.after_item_export == pmacro::AfterItemExport::Required) source += '}';
+    source += '}';
     return context.parse(source);
 }
 
@@ -199,11 +239,14 @@ auto table(pmacro::DeriveInput input, pmacro::Context& context) noexcept -> Outp
 auto sqlite_enum(pmacro::DeriveInput input, pmacro::Context& context) noexcept -> Output {
     auto snapshot = context.declaration();
     if (! snapshot)
-        return fail(context, {}, input.item_span, "liorm sqlite_enum requires a complete declaration");
+        return fail(
+            context, {}, input.item_span, "liorm sqlite_enum requires a complete declaration");
     const auto& declaration = **snapshot;
     if (! declaration.name)
-        return fail(
-            context, declaration.source, input.item_span, "liorm sqlite_enum requires a named type");
+        return fail(context,
+                    declaration.source,
+                    input.item_span,
+                    "liorm sqlite_enum requires a named type");
     if (declaration.scope != pmacro::DeclarationScope::Namespace)
         return fail(context,
                     declaration.source,

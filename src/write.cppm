@@ -4,6 +4,7 @@ export import :bind;
 import rstd;
 using namespace rstd::prelude;
 using namespace rstd::literals;
+using rstd::sync::Mutex;
 
 namespace liorm
 {
@@ -167,6 +168,81 @@ public:
         return rstd::Ok(WriteCommand<Policy, Model>(query_, rstd::move(model), kind_));
     }
 };
+} // namespace liorm
+
+namespace liorm
+{
+template<class Policy, class Model>
+struct WriteShapeCache {
+    using Compiler  = WriteCompiler<Policy, Model>;
+    using Shape     = WriteShape<Policy, Model>;
+    using Selection = array<bool, ActiveModel<Model>::field_count>;
+    struct Entry {
+        Selection selected;
+        bool      insert;
+        Shape     shape;
+    };
+    Vec<Entry> entries;
+    usize      next {};
+
+    auto get(const schema::Schema& schema, Selection selected, bool insert)
+        -> Result<Shape, WriteError> {
+        for (const auto& entry : entries) {
+            if (entry.insert != insert) continue;
+            bool matches = true;
+            for (usize i {}; i < selected.len(); ++i)
+                matches = matches && selected[i] == entry.selected[i];
+            if (matches) return Ok(Shape(entry.shape));
+        }
+        auto compiled = Compiler::shape(schema, selected, insert);
+        if (compiled.is_err()) return Err(rstd::move(compiled).unwrap_err());
+        auto  shape = rstd::move(compiled).unwrap();
+        Entry entry { selected, insert, shape };
+        if (entries.len() < usize(8))
+            entries.push(rstd::move(entry));
+        else {
+            entries[next] = rstd::move(entry);
+            next          = (next + usize(1)) % usize(8);
+        }
+        return Ok(rstd::move(shape));
+    }
+};
+
+template<const schema::Schema& Tables, class Policy, class Model>
+auto cached_write(ActiveModel<Model> model, bool insert)
+    -> Result<WriteCommand<Policy, Model>, WriteError> {
+    using Compiler   = WriteCompiler<Policy, Model>;
+    using Definition = typename ActiveModel<Model>::definition;
+    auto selected    = Compiler::selection(model, insert);
+    if (! insert) {
+        [&]<rstd::size_t... I>(rstd::mtp::index_sequence<I...>) {
+            ((Definition::template field<I>::primary ? (void)(selected[usize(I)] = false)
+                                                     : (void)0),
+             ...);
+        }(rstd::mtp::make_index_sequence<Definition::field_count> {});
+    }
+    static Mutex<WriteShapeCache<Policy, Model>> cache;
+    auto                                         compiled = [&] {
+        auto guard = cache.lock().unwrap();
+        return guard->get(Tables, selected, insert);
+    }();
+    if (compiled.is_err()) return Err(rstd::move(compiled).unwrap_err());
+    return compiled->instantiate(rstd::move(model));
+}
+} // namespace liorm
+
+export namespace liorm
+{
+template<const schema::Schema& Tables, class Policy, class Model>
+auto try_cached_insert(ActiveModel<Model> model)
+    -> Result<WriteCommand<Policy, Model>, WriteError> {
+    return cached_write<Tables, Policy>(rstd::move(model), true);
+}
+template<const schema::Schema& Tables, class Policy, class Model>
+auto try_cached_update(ActiveModel<Model> model)
+    -> Result<WriteCommand<Policy, Model>, WriteError> {
+    return cached_write<Tables, Policy>(rstd::move(model), false);
+}
 } // namespace liorm
 
 namespace liorm

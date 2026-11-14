@@ -27,6 +27,19 @@ public:
     constexpr void set(T value) { state_.replace_Set(rstd::move(value)); }
     constexpr void unchanged(T value) { state_.replace_Unchanged(rstd::move(value)); }
     constexpr void unset() { state_.replace_NotSet(); }
+    constexpr auto take() -> rstd::Option<T> {
+        if (state_.is_Set()) {
+            T value(rstd::move(state_.as_Set().value));
+            unset();
+            return rstd::Some(rstd::move(value));
+        }
+        if (state_.is_Unchanged()) {
+            T value(rstd::move(state_.as_Unchanged().value));
+            unset();
+            return rstd::Some(rstd::move(value));
+        }
+        return rstd::None();
+    }
     constexpr void reset() {
         if (state_.is_Unchanged()) {
             T value(rstd::move(state_.as_Unchanged().value));
