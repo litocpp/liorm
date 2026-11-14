@@ -407,6 +407,21 @@ class BoundForeignKey {
 public:
     constexpr BoundForeignKey() = default;
 };
+template<class Source, class Target, bool Reverse = false>
+class BoundRelation {
+    friend class BoundSchema;
+    friend class QueryBuilder;
+    template<class, class, bool>
+    friend class BoundRelation;
+    BoundForeignKey foreign_key_;
+    constexpr explicit BoundRelation(BoundForeignKey key): foreign_key_(key) {}
+
+public:
+    constexpr BoundRelation() = default;
+    constexpr auto reverse() const -> BoundRelation<Target, Source, ! Reverse> {
+        return BoundRelation<Target, Source, ! Reverse>(foreign_key_);
+    }
+};
 class BoundSchema {
     friend class QueryBuilder;
     QueryBuilder* owner_ {};
@@ -421,6 +436,13 @@ public:
     template<class Model>
     constexpr auto table(ref<str> alias = {}) const -> TypedBoundTable<Model>;
     constexpr auto foreign_key(ref<str> name) const -> BoundForeignKey;
+    template<schema::FixedString Name, class Source, class Target, auto... Members>
+    constexpr auto relation(schema::Relation<Name, Source, Target, Members...>) const
+        -> BoundRelation<Source, Target>;
+    template<class Definition>
+    constexpr auto relation(schema::ReverseRelation<Definition>) const {
+        return relation(Definition {}).reverse();
+    }
 };
 class QueryBuilder {
     friend class Expr;
@@ -701,6 +723,15 @@ public:
         }
         return result;
     }
+    template<class Source, class Target, bool Reverse>
+    constexpr auto on(BoundRelation<Source, Target, Reverse> relation,
+                      TypedBoundTable<Source>                source,
+                      TypedBoundTable<Target>                target) -> Expr {
+        if constexpr (Reverse)
+            return on(relation.foreign_key_, target, source);
+        else
+            return on(relation.foreign_key_, source, target);
+    }
     constexpr auto col(ref<str> name) -> Expr { return named(Kind::Column, name); }
     constexpr auto col(ref<str> qualifier, ref<str> name) -> Expr {
         return named(Kind::Column, name, qualifier);
@@ -937,6 +968,32 @@ constexpr auto BoundSchema::foreign_key(ref<str> name) const -> BoundForeignKey 
         return {};
     }
     return BoundForeignKey(owner_, registration_, *id);
+}
+template<schema::FixedString Name, class Source, class Target, auto... Members>
+constexpr auto BoundSchema::relation(schema::Relation<Name, Source, Target, Members...>) const
+    -> BoundRelation<Source, Target> {
+    using Definition = schema::Relation<Name, Source, Target, Members...>;
+    auto bound       = foreign_key(Name.view());
+    if (! bound.owner_) return {};
+    auto foreign = owner_->schemas_.foreign_key(bound.id_);
+    auto key     = owner_->schemas_.key(foreign.target);
+    auto sources = Definition::source_columns();
+    auto targets = Definition::target_columns();
+    bool valid =
+        same_name(owner_->schemas_.table(foreign.table).name, schema::table_name<Source>()) &&
+        same_name(owner_->schemas_.table(key.table).name, schema::table_name<Target>()) &&
+        key.primary && foreign.columns.len() == sources.len() && key.columns.len() == targets.len();
+    if (valid) {
+        for (usize i {}; i < sources.len(); ++i)
+            valid = valid &&
+                    same_name(owner_->schemas_.column(foreign.columns[i]).name, sources[i]) &&
+                    same_name(owner_->schemas_.column(key.columns[i]).name, targets[i]);
+    }
+    if (! valid) {
+        owner_->fail(ErrorKind::InvalidRelation, 0_usize, Name.view());
+        return {};
+    }
+    return BoundRelation<Source, Target>(bound);
 }
 constexpr auto BoundTable::source() const -> Expr {
     return owner_ ? Expr(owner_, source_) : Expr {};

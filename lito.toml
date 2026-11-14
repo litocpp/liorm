@@ -16,6 +16,34 @@ sources = ["tests/main.cpp", "tests/schema_model.cppm", "tests/query.cpp", "test
 name = "liorm-changeset-tests"
 sources = ["tests/main.cpp", "tests/changeset.cpp"]
 
+[[test]]
+name = "liorm-relations-tests"
+sources = ["tests/main.cpp", "tests/relations.cpp"]
+
+[[compile-test.cases]]
+name = "Relations.WrongModels"
+source = "tests/relations/compile/wrong_models.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching member function for call to 'on'"]
+
+[[compile-test.cases]]
+name = "Relations.ForeignColumn"
+source = "tests/relations/compile/foreign_column.cpp"
+outcome = "failure"
+diagnostic-contains = ["relation members must be registered source model columns"]
+
+[[compile-test.cases]]
+name = "Relations.ColumnCount"
+source = "tests/relations/compile/column_count.cpp"
+outcome = "failure"
+diagnostic-contains = ["relation source columns must match the target primary key"]
+
+[[compile-test.cases]]
+name = "Relations.WrongRegistration"
+source = "tests/relations/compile/wrong_registration.cpp"
+outcome = "failure"
+diagnostic-contains = ["no viable conversion"]
+
 [[compile-test.cases]]
 name = "Changeset.Valid"
 source = "tests/changeset/compile/valid.cpp"

@@ -133,4 +133,53 @@ constexpr auto column_name() -> ref<str> {
     using Definition = decltype(liorm_table_definition(static_cast<Model*>(nullptr)));
     return Definition::template column_name<Member>();
 }
+
+template<class Definition>
+struct ReverseRelation {
+    using source_model = typename Definition::target_model;
+    using target_model = typename Definition::source_model;
+    constexpr auto reverse() const -> Definition { return {}; }
+};
+
+// Typed relations reference the target model's declared primary key.
+template<FixedString Name, class Source, class Target, auto... Members>
+struct Relation {
+    using source_model         = Source;
+    using target_model         = Target;
+    using source_definition    = decltype(liorm_table_definition(static_cast<Source*>(nullptr)));
+    using target_definition    = decltype(liorm_table_definition(static_cast<Target*>(nullptr)));
+    static constexpr auto name = Name;
+    static_assert(sizeof...(Members) > 0, "relation requires source columns");
+    static_assert(((source_definition::template member_count<Members> == 1) && ...),
+                  "relation members must be registered source model columns");
+
+    static constexpr auto source_columns() {
+        return array<ref<str>, sizeof...(Members)> {
+            source_definition::template column_name<Members>()...
+        };
+    }
+    static constexpr auto target_columns() {
+        return []<rstd::size_t... I>(rstd::mtp::index_sequence<I...>) {
+            constexpr auto count = (rstd::size_t(0) + ... +
+                                    rstd::size_t(target_definition::template field<I>::primary));
+            array<ref<str>, count> columns {};
+            usize                  output {};
+            ((target_definition::template field<I>::primary
+                  ? (void)(columns[output++] = target_definition::template field<I>::name.view())
+                  : (void)0),
+             ...);
+            return columns;
+        }(rstd::mtp::make_index_sequence<target_definition::field_count> {});
+    }
+    static_assert(usize(sizeof...(Members)) == target_columns().len(),
+                  "relation source columns must match the target primary key");
+
+    static constexpr void register_in(SchemaBuilder&                                  builder,
+                                      const typename source_definition::Registration& source,
+                                      const typename target_definition::Registration& target) {
+        array<Column, sizeof...(Members)> columns { source.template column<Members>()... };
+        builder.foreign_key(Name.view(), columns.as_slice(), target.primary_key);
+    }
+    constexpr auto reverse() const -> ReverseRelation<Relation> { return {}; }
+};
 } // namespace liorm::schema
