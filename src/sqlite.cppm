@@ -112,6 +112,10 @@ public:
         return rstd::None();
     }
 };
+struct PageQuery {
+    ExpandedQuery count;
+    ExpandedQuery rows;
+};
 } // namespace liorm::query
 
 namespace liorm::query
@@ -1305,6 +1309,29 @@ public:
         return rstd::Ok(rstd::move(result));
     }
 
+    static auto run_page(Query value, i64 limit, i64 offset, ExpansionLimits ceiling)
+        -> rstd::Result<PageQuery, Error> {
+        if (! value.owner_ || value.id_ == 0_usize)
+            return rstd::Err(Error { .kind = ErrorKind::InvalidHandle });
+        auto& builder = *value.owner_;
+        auto  id      = builder.check(value);
+        if (builder.error_.kind != ErrorKind::None) return rstd::Err(Error(builder.error_));
+        const auto& data = builder.queries_[id];
+        if (data.kind != StatementKind::Select || data.get(Slot::Limit) != 0_usize ||
+            data.get(Slot::Offset) != 0_usize || limit < i64() || offset < i64())
+            return rstd::Err(Error { .kind = ErrorKind::InvalidShape });
+        auto count          = builder.select(builder.function(Function::Count, builder.star()))
+                                  .from(value.as("__liorm_page"_str));
+        auto rows           = value.limit(builder.integer(limit.to_primitive()))
+                                  .offset(builder.integer(offset.to_primitive()));
+        auto compiled_count = run_expanded_planned(count, ceiling);
+        if (compiled_count.is_err()) return rstd::Err(rstd::move(compiled_count).unwrap_err());
+        auto compiled_rows = run_expanded_planned(rows, ceiling);
+        if (compiled_rows.is_err()) return rstd::Err(rstd::move(compiled_rows).unwrap_err());
+        return rstd::Ok(
+            PageQuery { rstd::move(compiled_count).unwrap(), rstd::move(compiled_rows).unwrap() });
+    }
+
     static constexpr auto run(Query value) -> rstd::Result<CompiledQuery, Error> {
         if (! value.owner_ || value.id_ == 0_usize)
             return rstd::Err(Error { .kind = ErrorKind::InvalidHandle });
@@ -1347,6 +1374,23 @@ inline void invalid_query(Error) {
 
 export namespace liorm::query
 {
+// Compilation consumes no builder ownership; both returned queries own SQL and metadata.
+inline auto try_compile_page(Query           query,
+                             i64             limit,
+                             i64             offset,
+                             ExpansionLimits ceiling = planned_expansion_ceiling)
+    -> rstd::Result<PageQuery, Error> {
+    return Compiler::run_page(query, limit, offset, ceiling);
+}
+template<class Build>
+auto try_compile_page(Build           build,
+                      i64             limit,
+                      i64             offset,
+                      ExpansionLimits ceiling = planned_expansion_ceiling,
+                      Limits          limits  = {}) -> rstd::Result<PageQuery, Error> {
+    QueryBuilder builder(limits);
+    return try_compile_page(build(builder), limit, offset, ceiling);
+}
 constexpr auto try_compile(Query query) -> rstd::Result<CompiledQuery, Error> {
     return Compiler::run(query);
 }

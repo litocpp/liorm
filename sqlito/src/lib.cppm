@@ -514,7 +514,8 @@ auto one_row(Prepared&         statement,
 
 template<class Prepared, class Projection>
 auto all_rows(Prepared& statement, const Projection& projection)
-    -> Result<Vec<typename Projection::value_type>, ::sqlito::Error> {
+    -> Result<Vec<typename Projection::value_type>,
+              typename decltype(projection.decode(rstd::mtp::declval<Reader&>()))::error_type> {
     Vec<typename Projection::value_type> result;
     while (rstd_try(statement.step()) == ::sqlito::Step::Row) {
         auto reader = statement.reader();
@@ -541,6 +542,77 @@ auto one_model(Prepared&                                                statemen
     auto result = rstd_try(liorm::decode_model(group, reader, rstd::move(factory)));
     rstd_try(discard(statement));
     return Ok(Some(rstd::move(result)));
+}
+
+template<class Row>
+struct PageRows {
+    i64      total;
+    Vec<Row> rows;
+};
+
+class PreparedPage {
+    PreparedQuery<query::ExpandedQuery> count_;
+    PreparedQuery<query::ExpandedQuery> rows_;
+
+    PreparedPage(PreparedQuery<query::ExpandedQuery> count,
+                 PreparedQuery<query::ExpandedQuery> rows)
+        : count_(rstd::move(count)), rows_(rstd::move(rows)) {}
+
+public:
+    PreparedPage(const PreparedPage&)                    = delete;
+    auto operator=(const PreparedPage&) -> PreparedPage& = delete;
+    PreparedPage(PreparedPage&&)                         = default;
+    auto operator=(PreparedPage&&) -> PreparedPage&      = default;
+
+    template<class Session>
+    static auto create(Session& session, query::PageQuery query)
+        -> Result<PreparedPage, ::sqlito::Error>
+        requires(rstd::mtp::same_as<Session, ::sqlito::Connection> ||
+                 rstd::mtp::same_as<Session, ::sqlito::Transaction>)
+    {
+        auto count = rstd_try(prepare(session, rstd::move(query.count)));
+        auto rows  = rstd_try(prepare(session, rstd::move(query.rows)));
+        return Ok(PreparedPage(rstd::move(count), rstd::move(rows)));
+    }
+
+    template<class T>
+    auto bind(ref<str> name, const T& value) -> Result<empty, liorm::BindError<::sqlito::Error>> {
+        rstd_try(count_.bind(name, value));
+        return rows_.bind(name, value);
+    }
+    template<class T>
+    auto bind_group(ref<str> name, slice<T> values)
+        -> Result<empty, liorm::BindError<::sqlito::Error>> {
+        rstd_try(count_.bind_group(name, values));
+        return rows_.bind_group(name, values);
+    }
+    template<class Getter>
+    auto bind_group_with(ref<str> name, usize count, Getter getter)
+        -> Result<empty, liorm::BindError<::sqlito::Error>> {
+        auto read = [&getter](usize index) -> decltype(auto) {
+            return getter(index);
+        };
+        rstd_try(count_.bind_group_with(name, count, read));
+        return rows_.bind_group_with(name, count, read);
+    }
+    template<class Projection>
+    auto fetch(const Projection& projection)
+        -> Result<PageRows<typename Projection::value_type>,
+                  typename decltype(projection.decode(rstd::mtp::declval<Reader&>()))::error_type> {
+        // An active count row keeps the Connection's read snapshot alive for rows_.
+        auto total = rstd_try(scalar<i64>(count_, usize(), RowConsumption::First));
+        auto rows  = rstd_try(all_rows(rows_, projection));
+        rstd_try(finish_row(count_, RowConsumption::Exact, "expected exactly one count row"_str));
+        return Ok(PageRows<typename Projection::value_type> { total, rstd::move(rows) });
+    }
+};
+
+template<class Session>
+auto prepare_page(Session& session, query::PageQuery query) -> Result<PreparedPage, ::sqlito::Error>
+    requires(rstd::mtp::same_as<Session, ::sqlito::Connection> ||
+             rstd::mtp::same_as<Session, ::sqlito::Transaction>)
+{
+    return PreparedPage::create(session, rstd::move(query));
 }
 
 class ActiveWriteError {

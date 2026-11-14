@@ -127,6 +127,7 @@ public:
     constexpr auto binary(Binary op, Expr other) const -> Expr;
     constexpr auto operator!() const -> Expr;
 };
+// AST handles borrow their builder; only compiled queries own their data.
 class Query {
     friend class QueryBuilder;
     friend class Compiler;
