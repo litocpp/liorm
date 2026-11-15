@@ -282,6 +282,11 @@ public:
 
 template<class Query>
 class PreparedQuery;
+class ReadError {
+    RSTD_ENUM(ReadError,
+              (Storage, (::sqlito::Error error;)),
+              (Binding, (liorm::BindError<::sqlito::Error> error;)))
+};
 class Writer;
 template<class Model, class Policy = Writer>
 class PreparedWrite;
@@ -339,6 +344,11 @@ concept WritePolicy = requires { typename Policy::error_type; } &&
                       rstd::mtp::same_as<typename Policy::error_type, ::sqlito::Error> &&
                       rstd::mtp::init<Policy, Writer&>;
 
+template<const query::CompiledQuery& Query>
+struct StaticQuery {
+    static constexpr const auto& definition = Query;
+};
+
 template<class Query>
 class PreparedQuery {
     Query               query_;
@@ -364,17 +374,53 @@ public:
         return Ok(PreparedQuery(rstd::move(query), rstd::move(statement).unwrap()));
     }
 
-    auto query() const& -> const Query& { return query_; }
-    auto query() const&& -> const Query& = delete;
+    template<const query::CompiledQuery& StaticQuery, class Session, class... Fields>
+    static auto create(Session& session, liorm::Parameters<Fields...> parameters)
+        -> Result<PreparedQuery, ReadError>
+        requires rstd::mtp::same_as<Query, liorm::sqlito::StaticQuery<StaticQuery>> &&
+                 (rstd::mtp::same_as<Session, ::sqlito::Connection> ||
+                  rstd::mtp::same_as<Session, ::sqlito::Transaction>)
+    {
+        liorm::Parameters<Fields...>::template validate<StaticQuery, Writer>();
+        auto statement = session.prepare(StaticQuery.sql());
+        if (statement.is_err()) return Err(ReadError::Storage(rstd::move(statement).unwrap_err()));
+        auto   owned = rstd::move(statement).unwrap();
+        Writer writer(owned);
+        auto   bound = parameters.template bind<StaticQuery>(writer);
+        if (bound.is_err()) return Err(ReadError::Binding(rstd::move(bound).unwrap_err()));
+        return Ok(PreparedQuery(Query {}, rstd::move(owned)));
+    }
+
+    auto query() const& -> decltype(auto) {
+        if constexpr (requires { Query::definition; })
+            return (Query::definition);
+        else
+            return (query_);
+    }
+    auto query() const&& = delete;
+    template<class... Fields>
+    auto bind(liorm::Parameters<Fields...> parameters)
+        -> Result<empty, liorm::BindError<::sqlito::Error>>
+        requires requires { Query::definition; }
+    {
+        Writer writer(statement_);
+        return parameters.template bind<Query::definition>(writer);
+    }
     template<class Model>
     auto bind_model(const Model& model) -> Result<empty, liorm::BindError<::sqlito::Error>> {
         Writer writer(statement_);
-        return liorm::bind_model(query_, writer, model);
+        return liorm::bind_model(query(), writer, model);
+    }
+    template<class Model>
+    auto bind_key(liorm::Key<Model> key) -> Result<empty, liorm::BindError<::sqlito::Error>> {
+        auto   values = rstd::move(key).into_active();
+        Writer writer(statement_);
+        return liorm::bind_values<Model>(query(), writer, liorm::ActiveValues<Model> { values });
     }
     template<class T>
     auto bind(ref<str> name, const T& value) -> Result<empty, liorm::BindError<::sqlito::Error>> {
         Writer writer(statement_);
-        return liorm::bind_parameter(query_, writer, name, value);
+        return liorm::bind_parameter(query(), writer, name, value);
     }
     template<class T>
     auto bind_group(ref<str> name, slice<T> values)
@@ -387,19 +433,19 @@ public:
     auto bind_group_with(ref<str> name, usize count, Getter getter)
         -> Result<empty, liorm::BindError<::sqlito::Error>> {
         Writer writer(statement_);
-        return liorm::bind_group_values(query_, writer, name, count, rstd::move(getter));
+        return liorm::bind_group_values(query(), writer, name, count, rstd::move(getter));
     }
     template<class T>
     auto bind_repeat(ref<str> name, const T& value)
         -> Result<empty, liorm::BindError<::sqlito::Error>> {
         Writer writer(statement_);
-        return liorm::bind_repeated(query_, writer, name, value);
+        return liorm::bind_repeated(query(), writer, name, value);
     }
     template<class Shape, class GetRow>
     auto bind_rows(const Shape& shape, usize count, GetRow get_row)
         -> Result<empty, liorm::BindError<::sqlito::Error>> {
         Writer writer(statement_);
-        return shape.bind(query_, writer, count, rstd::move(get_row));
+        return shape.bind(query(), writer, count, rstd::move(get_row));
     }
     template<class T>
     auto bind(usize slot, const T& value) -> Result<empty, ::sqlito::Error>
@@ -503,7 +549,8 @@ template<class Prepared, class Projection>
 auto one_row(Prepared&         statement,
              const Projection& projection,
              RowConsumption    consumption = RowConsumption::Drain)
-    -> Result<Option<typename Projection::value_type>, ::sqlito::Error> {
+    -> Result<Option<typename Projection::value_type>,
+              typename decltype(projection.decode(rstd::mtp::declval<Reader&>()))::error_type> {
     using Row = typename Projection::value_type;
     if (rstd_try(statement.step()) == ::sqlito::Step::Done) return Ok<Option<Row>>(None());
     auto reader = statement.reader();
@@ -536,11 +583,13 @@ template<class Prepared,
                       Factory factory) { liorm::decode_model(group, reader, rstd::move(factory)); }
 auto one_model(Prepared&                                                statement,
                query::ProjectionGroup<query::ModelGroup<Model>, Offset> group,
-               Factory factory = {}) -> Result<Option<Model>, ::sqlito::Error> {
+               Factory                                                  factory = {},
+               RowConsumption consumption = RowConsumption::Drain)
+    -> Result<Option<Model>, ::sqlito::Error> {
     if (rstd_try(statement.step()) == ::sqlito::Step::Done) return Ok<Option<Model>>(None());
     auto reader = statement.reader();
     auto result = rstd_try(liorm::decode_model(group, reader, rstd::move(factory)));
-    rstd_try(discard(statement));
+    rstd_try(finish_row(statement, consumption, "expected at most one row"_str));
     return Ok(Some(rstd::move(result)));
 }
 
@@ -792,5 +841,204 @@ auto update_all(Session& session, Model model, Factory factory = {})
     values.reset_all();
     return execute_planned(
         session, liorm::try_cached_update<Tables, Policy>(rstd::move(values)), rstd::move(factory));
+}
+} // namespace liorm::sqlito
+
+export namespace rstd
+{
+template<>
+struct Impl<convert::From<::sqlito::Error>, liorm::sqlito::ReadError> {
+    static auto from(::sqlito::Error error) -> liorm::sqlito::ReadError {
+        return liorm::sqlito::ReadError::Storage(rstd::move(error));
+    }
+};
+template<>
+struct Impl<convert::From<liorm::BindError<::sqlito::Error>>, liorm::sqlito::ReadError> {
+    static auto from(liorm::BindError<::sqlito::Error> error) -> liorm::sqlito::ReadError {
+        return liorm::sqlito::ReadError::Binding(rstd::move(error));
+    }
+};
+template<class E>
+    requires(! rstd::mtp::same_as<E, liorm::sqlito::ReadError>) &&
+            requires(::sqlito::Error storage, liorm::BindError<::sqlito::Error> binding) {
+                rstd::into<E>(rstd::move(storage));
+                rstd::into<E>(rstd::move(binding));
+            }
+struct Impl<convert::From<liorm::sqlito::ReadError>, E> {
+    static auto from(liorm::sqlito::ReadError error) -> E {
+        RSTD_MATCH(error) {
+            RSTD_CASE(Storage, cause) {
+                return rstd::into<E>(rstd::move(cause));
+            }
+            RSTD_CASE(Binding, cause) {
+                return rstd::into<E>(rstd::move(cause));
+            }
+        }
+    }
+};
+} // namespace rstd
+
+namespace liorm::sqlito
+{
+template<class E>
+struct ReadResultError {
+    using type = E;
+};
+template<>
+struct ReadResultError<::sqlito::Error> {
+    using type = ReadError;
+};
+template<class Projection>
+using ProjectionReadError =
+    typename ReadResultError<typename decltype(rstd::mtp::declval<const Projection&>().decode(
+        rstd::mtp::declval<Reader&>()))::error_type>::type;
+
+template<const schema::Schema& Tables, class Model, bool Exists>
+inline constexpr auto primary_read_query = query::compile([](query::QueryBuilder& b) {
+    using Definition          = typename query::ModelGroup<Model>::definition;
+    auto                table = b.use(Tables).template table<Model>();
+    Option<query::Expr> condition;
+    [&]<rstd::size_t... I>(rstd::mtp::index_sequence<I...>) {
+        static_assert((Definition::template field<I>::primary || ...),
+                      "primary read requires a primary key");
+        auto append = [&]<class Field>() {
+            if constexpr (Field::primary) {
+                using Value = typename Field::value_type;
+                static_assert(Writer::template supports<Value>(), "unsupported primary key codec");
+                auto equal = table.template col<Field::member>() ==
+                             b.template member_param<Field::member>(
+                                 Field::name.view(), Writer::template parameter_type<Value>());
+                condition  = condition.is_some() ? Some(*condition && equal) : Some(equal);
+            }
+        };
+        (append.template operator()<typename Definition::template field<I>>(), ...);
+    }(rstd::mtp::make_index_sequence<Definition::field_count> {});
+    auto select = [&] {
+        if constexpr (Exists)
+            return b.select(b.integer(1));
+        else {
+            query::ProjectionLayout<query::ModelGroup<Model>> layout;
+            return b.select(query::project(layout, table).as_slice());
+        }
+    }();
+    return select.from(table.source()).where(*condition).limit(b.integer(1));
+});
+} // namespace liorm::sqlito
+
+export namespace liorm::sqlito
+{
+template<const query::CompiledQuery& Query, class Session, class... Fields>
+auto prepare(Session& session, liorm::Parameters<Fields...> parameters = liorm::parameters())
+    -> Result<PreparedQuery<StaticQuery<Query>>, ReadError> {
+    return PreparedQuery<StaticQuery<Query>>::template create<Query>(session,
+                                                                     rstd::move(parameters));
+}
+
+template<const query::CompiledQuery& Query, class Session, class Projection, class... Fields>
+auto fetch_one(Session&                     session,
+               const Projection&            projection,
+               liorm::Parameters<Fields...> parameters  = liorm::parameters(),
+               RowConsumption               consumption = RowConsumption::Drain)
+    -> Result<Option<typename Projection::value_type>, ProjectionReadError<Projection>> {
+    auto statement = rstd_try(prepare<Query>(session, rstd::move(parameters)));
+    auto result    = rstd_try(one_row(statement, projection, consumption));
+    return Ok(rstd::move(result));
+}
+
+template<const query::CompiledQuery& Query, class Session, class Projection, class... Fields>
+auto fetch_all(Session&                     session,
+               const Projection&            projection,
+               liorm::Parameters<Fields...> parameters = liorm::parameters())
+    -> Result<Vec<typename Projection::value_type>, ProjectionReadError<Projection>> {
+    auto statement = rstd_try(prepare<Query>(session, rstd::move(parameters)));
+    auto result    = rstd_try(all_rows(statement, projection));
+    return Ok(rstd::move(result));
+}
+
+template<const query::CompiledQuery& Query,
+         class Session,
+         class Model,
+         rstd::size_t Offset,
+         class... Fields,
+         class Factory = liorm::DefaultModelFactory<Model>>
+    requires requires(query::ProjectionGroup<query::ModelGroup<Model>, Offset> group,
+                      Reader&                                                  reader,
+                      Factory factory) { liorm::decode_model(group, reader, rstd::move(factory)); }
+auto fetch_model(Session&                                                 session,
+                 query::ProjectionGroup<query::ModelGroup<Model>, Offset> group,
+                 liorm::Parameters<Fields...> parameters  = liorm::parameters(),
+                 RowConsumption               consumption = RowConsumption::Drain,
+                 Factory                      factory = {}) -> Result<Option<Model>, ReadError> {
+    auto statement = rstd_try(prepare<Query>(session, rstd::move(parameters)));
+    auto result    = rstd_try(one_model(statement, group, rstd::move(factory), consumption));
+    return Ok(rstd::move(result));
+}
+
+template<const query::CompiledQuery& Query, class T, class Session, class... Fields>
+auto fetch_scalar(Session&                     session,
+                  liorm::Parameters<Fields...> parameters  = liorm::parameters(),
+                  RowConsumption               consumption = RowConsumption::Exact,
+                  usize                        column      = usize()) -> Result<T, ReadError> {
+    auto statement = rstd_try(prepare<Query>(session, rstd::move(parameters)));
+    return Ok(rstd_try(scalar<T>(statement, column, consumption)));
+}
+
+template<const query::CompiledQuery& Query, class T, class Session, class... Fields>
+auto fetch_optional_scalar(Session&                     session,
+                           liorm::Parameters<Fields...> parameters  = liorm::parameters(),
+                           RowConsumption               consumption = RowConsumption::Exact,
+                           usize column = usize()) -> Result<Option<T>, ReadError> {
+    auto statement = rstd_try(prepare<Query>(session, rstd::move(parameters)));
+    return Ok(rstd_try(optional_scalar<T>(statement, column, consumption)));
+}
+
+template<class Prepared>
+auto row_exists(Prepared& statement, RowConsumption consumption = RowConsumption::First)
+    -> Result<bool, ::sqlito::Error> {
+    if (rstd_try(statement.step()) == ::sqlito::Step::Done) return Ok(false);
+    rstd_try(finish_row(statement, consumption, "expected at most one row"_str));
+    return Ok(true);
+}
+
+template<const query::CompiledQuery& Query, class Session, class... Fields>
+auto fetch_exists(Session&                     session,
+                  liorm::Parameters<Fields...> parameters = liorm::parameters(),
+                  RowConsumption consumption = RowConsumption::First) -> Result<bool, ReadError> {
+    auto statement = rstd_try(prepare<Query>(session, rstd::move(parameters)));
+    return Ok(rstd_try(row_exists(statement, consumption)));
+}
+
+template<const schema::Schema& Tables,
+         class Model,
+         class Session,
+         class KeyValue,
+         class Factory = liorm::DefaultModelFactory<Model>>
+    requires rstd::mtp::init<liorm::Key<Model>, KeyValue> &&
+             requires(Reader& reader, Factory factory) {
+                 liorm::decode_model(
+                     query::ProjectionLayout<query::ModelGroup<Model>> {}.template group<0>(),
+                     reader,
+                     rstd::move(factory));
+             }
+auto find(Session&       session,
+          KeyValue&&     key,
+          RowConsumption consumption = RowConsumption::Drain,
+          Factory        factory     = {}) -> Result<Option<Model>, ReadError> {
+    auto statement = rstd_try(prepare(session, primary_read_query<Tables, Model, false>));
+    rstd_try(statement.bind_key(liorm::Key<Model>(rstd::forward<KeyValue>(key))));
+    auto result =
+        rstd_try(one_model(statement,
+                           query::ProjectionLayout<query::ModelGroup<Model>> {}.template group<0>(),
+                           rstd::move(factory),
+                           consumption));
+    return Ok(rstd::move(result));
+}
+
+template<const schema::Schema& Tables, class Model, class Session, class KeyValue>
+    requires rstd::mtp::init<liorm::Key<Model>, KeyValue>
+auto exists(Session& session, KeyValue&& key) -> Result<bool, ReadError> {
+    auto statement = rstd_try(prepare(session, primary_read_query<Tables, Model, true>));
+    rstd_try(statement.bind_key(liorm::Key<Model>(rstd::forward<KeyValue>(key))));
+    return Ok(rstd_try(row_exists(statement)));
 }
 } // namespace liorm::sqlito

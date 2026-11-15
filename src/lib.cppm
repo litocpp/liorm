@@ -10,5 +10,6 @@ export import :row;
 export import :projection;
 export import :sqlite;
 export import :bind;
+export import :parameters;
 export import :write;
 export import :rows;

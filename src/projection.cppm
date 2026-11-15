@@ -61,6 +61,15 @@ struct TupleProjection {
     }
 };
 
+template<class Model, rstd::size_t Offset = 0>
+struct ModelProjection {
+    using value_type = Model;
+    template<class Reader>
+    auto decode(Reader& reader) const -> Result<Model, typename Reader::error_type> {
+        return decode_model(query::ProjectionGroup<query::ModelGroup<Model>, Offset> {}, reader);
+    }
+};
+
 template<class Row, auto... Members>
     requires(sizeof...(Members) > 0) &&
             (rstd::mtp::same_as<typename schema::MemberPointer<decltype(Members)>::owner_type,

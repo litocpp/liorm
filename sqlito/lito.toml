@@ -20,3 +20,60 @@ rstd-test = { version = "0.1.9" }
 [[test]]
 name = "liorm-sqlito-tests"
 sources = ["tests/main.cpp", "tests/enum_derive.cpp", "tests/primitive_codec.cpp", "tests/row.cpp", "tests/write.cpp", "tests/module.cppm", "tests/module_consumer.cpp", "tests/active.cpp", "tests/parameters.cpp", "tests/terminals.cpp", "tests/pagination.cpp", "tests/rows.cpp", "tests/policy.cpp", "tests/changeset.cpp"]
+
+[[test]]
+name = "liorm-static-read-tests"
+sources = ["tests/main.cpp", "tests/static_read.cpp"]
+
+[[compile-test.cases]]
+name = "StaticRead.Valid"
+source = "tests/static_read/compile/valid.cpp"
+outcome = "success"
+
+[[compile-test.cases]]
+name = "StaticRead.Missing"
+source = "tests/static_read/compile/missing.cpp"
+outcome = "failure"
+diagnostic-contains = ["missing static query parameter"]
+
+[[compile-test.cases]]
+name = "StaticRead.Duplicate"
+source = "tests/static_read/compile/duplicate.cpp"
+outcome = "failure"
+diagnostic-contains = ["duplicate static query parameter"]
+
+[[compile-test.cases]]
+name = "StaticRead.Extra"
+source = "tests/static_read/compile/extra.cpp"
+outcome = "failure"
+diagnostic-contains = ["extra static query parameter"]
+
+[[compile-test.cases]]
+name = "StaticRead.WrongType"
+source = "tests/static_read/compile/wrong_type.cpp"
+outcome = "failure"
+diagnostic-contains = ["incompatible static query parameter type"]
+
+[[compile-test.cases]]
+name = "StaticRead.Nullable"
+source = "tests/static_read/compile/nullable.cpp"
+outcome = "failure"
+diagnostic-contains = ["incompatible static query parameter type"]
+
+[[compile-test.cases]]
+name = "StaticRead.RebindMissing"
+source = "tests/static_read/compile/rebind_missing.cpp"
+outcome = "failure"
+diagnostic-contains = ["missing static query parameter"]
+
+[[compile-test.cases]]
+name = "StaticRead.WrongKey"
+source = "tests/static_read/compile/wrong_key.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching function for call to 'find'"]
+
+[[compile-test.cases]]
+name = "StaticRead.WrongFactory"
+source = "tests/static_read/compile/wrong_factory.cpp"
+outcome = "failure"
+diagnostic-contains = ["no matching function for call to 'find'"]
