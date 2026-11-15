@@ -1,7 +1,3 @@
-/.lito/
-/tests/macro/.lito/
-/sqlito/.lito/
-/build/
+.lito/
+build/
 /tools/
-/sqlito/build/
-/tests/macro/build/

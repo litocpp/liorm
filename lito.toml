@@ -8,6 +8,9 @@ name = "liorm"
 module = "liorm"
 archive = "liorm"
 
+[features.sqlito]
+default = true
+
 [[test]]
 name = "liorm-tests"
 sources = ["tests/main.cpp", "tests/schema_model.cppm", "tests/query.cpp", "tests/sqlite.cpp", "tests/schema.cpp", "tests/schema_query.cpp", "tests/schema_sqlite.cpp", "tests/groups.cpp", "tests/bulk.cpp", "tests/window.cpp", "tests/named_bind.cpp", "tests/expansion_plan.cpp", "tests/pagination.cpp", "tests/rows.cpp", "tests/active.cpp", "tests/active_write.cpp"]
@@ -140,7 +143,7 @@ rtti = false
 [dependencies]
 rstd-core = { version = "0.1.9", pub = true }
 rstd-std = { version = "0.1.9", pub = true }
+sqlito = { version = "0.1.0", pub = true, condition = "feature.sqlito" }
 
 [dev-dependencies]
-sqlito = { version = "0.1.0", path = "../sqlito" }
 rstd-test = { version = "0.1.9" }
